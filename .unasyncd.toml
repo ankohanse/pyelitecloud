@@ -1,0 +1,22 @@
+[tool.unasyncd]
+remove_unused_imports = false
+no_cache = false
+force_regen = false
+add_editors_note = true
+exclude = [
+    "Something",
+    "SomethingElse.within"
+]
+
+[tool.unasyncd.files]
+    "src/pyelitecloud/api_async.py" = "src/pyelitecloud/api_sync.py"
+
+[tool.unasyncd.add_replacements]
+    "AsyncEliteCloudApi" = "EliteCloudApi"
+    "httpx.AsyncClient" = "httpx.Client"
+    "AsyncTaskHelper" = "TaskHelper"
+    "aclose" = "close"
+    "CALL_CONTEXT_ASYNC" = "CALL_CONTEXT_SYNC"
+    "pytest_asyncio" = "pytest"
+
+
