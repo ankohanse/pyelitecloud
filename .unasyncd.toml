@@ -14,7 +14,10 @@ exclude = [
 [tool.unasyncd.add_replacements]
     "AsyncEliteCloudApi" = "EliteCloudApi"
     "httpx.AsyncClient" = "httpx.Client"
+    "httpx_ws.aconnect_ws" = "httpx_ws.connect_ws"
     "AsyncTaskHelper" = "TaskHelper"
+    "asyncio.Queue" = "queue.Queue"
+    "asyncio.QueueEmpty" = "queue.Empty"
     "aclose" = "close"
     "CALL_CONTEXT_ASYNC" = "CALL_CONTEXT_SYNC"
     "pytest_asyncio" = "pytest"

@@ -18,9 +18,8 @@ class CallContext(StrEnum):
 
 class LoginMethod(StrEnum):
     ACCESS_TOKEN = 'Access-Token'
-    REFRESH_TOKEN = 'Refresh-Token'
+    RENEW_TOKEN = 'Renew-Token'
     AUTH_API = 'Auth-Api'
-
 
 
 class EliteCloudError(Exception):
@@ -45,6 +44,16 @@ class EliteCloudSite:
     name: str
     panel_mac: str
     panel_serial: str
+
+class EliteCloudSites(list[EliteCloudSite]):
+    def get_by_uuid(self, uuid: str):
+        return next( (s for s in self if s.uuid==uuid), None)
+
+    def get_by_mac(self, mac: str):
+        return next( (s for s in self if s.panel_mac==mac), None)
+    
+    def get_by_serial(self, serial: str):
+        return next( (s for s in self if s.panel_serial==serial), None)
 
 
 @dataclass

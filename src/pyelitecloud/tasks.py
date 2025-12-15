@@ -8,24 +8,28 @@ class AsyncTaskHelper:
     """
     Helper to unify async task create, sleep and stop
     """
-    def __init__(self):
-         self._task = None
-         self._stop_event = asyncio.Event()
+    def __init__(self, target_function, *args, **kwargs):
+        self.target_function = target_function
+        self.args = args
+        self.kwargs = kwargs
 
-    async def start(self, function):
-        coro = function()
-        self._task = asyncio.create_task(coro=coro, name=function.__name__)
+        self.result = None
+        self._task = None
+        self._stop_event = asyncio.Event()
+
+    async def start(self):
+        coro = self.target_function(*self.args, **self.kwargs)
+        self._task = asyncio.create_task(coro=coro, name=self.target_function.__name__)
+        return self
     
     async def stop(self):
         try:
-            # Request the stop
             self._stop_event.set()
-        
-            # await the task to allow it to finish and cleanup
-            await self._task
-
+            self._result = await self._task # await the task to allow it to finish and cleanup
         except asyncio.CancelledError:
             pass
+
+        return self.result
 
     def is_stop_requested(self):
         return self._stop_event.is_set()
@@ -40,25 +44,35 @@ class AsyncTaskHelper:
             return False
 
          
-class TaskHelper:
+class TaskHelper(threading.Thread):
     """
     Helper to unify sync task create, sleep and stop
     """
-    def __init__(self):
-         self._task = None
-         self._stop_event = threading.Event()
+    def __init__(self, target_function, *args, **kwargs):
+        super().__init__()
+        self.target_function = target_function
+        self.args = args
+        self.kwargs = kwargs
 
-    def start(self, function):
-        self._task = threading.Thread(target=function, name=function.__name__)
-        self._task.start()
+        self.name = target_function.__name__
+        self.result = None
+        self._task = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        super().start()
+        return self
+
+    def run(self):
+        """Called internally after start()"""
+        self.result = self.target_function(*self.args, **self.kwargs)
 
     def stop(self):
-        # Request the stop
         self._stop_event.set()
-
-        # Wait for the thread to finish
-        self._task.join()
-
+        
+        super().join()
+        return self.result
+    
     def is_stop_requested(self):
         return self._stop_event.is_set()
     

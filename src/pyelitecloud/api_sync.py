@@ -4,11 +4,14 @@
 
 import asyncio
 import base64
+import json
 import uuid
 import jwt
 import httpx
+import httpx_ws
 import logging
 import math
+import queue
 import threading
 
 from datetime import datetime, timezone
@@ -18,29 +21,32 @@ from typing import Any
 from .const import (
     AUTH_API_URL,
     AUTH_DEVICE_NAME,
+    DEVICE_TOKEN_EXPIRE_MARGIN,
     PANEL_API_URL,
     ACCESS_TOKEN_EXPIRE_MARGIN,
     CALL_CONTEXT_ASYNC,
     CALL_CONTEXT_SYNC,
+    PANEL_API_WS,
+    SERVER_API_URL,
     utcnow_ts,
     utcnow_dt,
 )
 from .data import (
-    CallContext,
-    EliteCloudParamError,
     EliteCloudSite,
+    EliteCloudSites,
     LoginMethod,
     EliteCloudHistoryDetail, 
     EliteCloudHistoryItem,
-    EliteCloudConnectError, 
     EliteCloudAuthError, 
+    EliteCloudConnectError, 
     EliteCloudDataError, 
-    EliteCloudError, 
+    EliteCloudParamError,
 )
 from .tasks import (
     AsyncTaskHelper,
     TaskHelper,
 )
+import time
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,17 +54,20 @@ _LOGGER = logging.getLogger(__name__)
 
 class EliteCloudApiFlag(StrEnum):
     """Extra flags to pass to Api"""
-    REFRESH_HANDLER_START   = "refresh_handler_start"   # bool
-    DIAGNOSTICS_COLLECT     = "diagnostics_collect"     # bool
+    RENEW_HANDLER_START   = "renew_handler_start"   # bool
+    DIAGNOSTICS_COLLECT   = "diagnostics_collect"   # bool
+    DEVICE_ID             = "device_id"             # str
 
 
-class AsyncEliteCloudWaterApi:
+class EliteCloudApi:
     """Elite Cloud API"""
 
     # Constants
     CALL_CONTEXT = CALL_CONTEXT_SYNC   # Sync/Async environment detection
     
-    def __init__(self, username, password, client:httpx.Client|None = None, flags:dict = {}):
+    def __init__(self, username, password, 
+                 client:httpx.Client = None, 
+                 flags:dict = {}):
         
         # Configuration
         self._username: str = username
@@ -75,28 +84,41 @@ class AsyncEliteCloudWaterApi:
         
         self._user_uuid: str = None
         self._device_uuid: str = None
-        self._device_id: str = None
+
+        # We generate the device_id based on the username, so it will be the same every time
+        # and not add an extra device to the EliteCloud registry every time the code runs.
+        self._device_id: str = flags.get(EliteCloudApiFlag.DEVICE_ID, str(uuid.uuid5(uuid.NAMESPACE_OID, self._username)) )
 
         # Cached data
-        self._sites: dict[str, EliteCloudSite] = {}
+        self._sites: EliteCloudSites = EliteCloudSites()
+        self._sites_subscribed: set[str] = set()
+        self._sites_callbacks: dict = dict()
+        self._sites_status: dict = dict()
 
-        # Automatic refresh of access token
-        self._refresh_handler_start = flags.get(EliteCloudApiFlag.REFRESH_HANDLER_START, False)
-        self._refresh_task = None
-        self._refresh_schedule: float = 0
+        # Automatic renew of access token
+        self._renew_handler_start: bool = flags.get(EliteCloudApiFlag.RENEW_HANDLER_START, False)
+        self._renew_task = None
+        self._renew_schedule: float = 0
 
         # Http Client.
-        self._http_client: httpx.Client = client or httpx.Client()
-        self._http_client_close = False if client else True     # Do not close an external passed client
+        self._http_client: httpx.Client = client or httpx.Client(verify=False)
+        self._http_client_close: bool = False if client else True     # Do not close an external passed client
+
+        # Websockets Client
+        self._ws_task = None
+        self._ws_rsp_task = None
+
+        self._ws_req_queue: queue.Queue = queue.Queue()
+        self._ws_rsp_queue: queue.Queue = queue.Queue()
 
         # Locks to protect certain operations from being called from multiple threads
         self._login_lock = threading.Lock()
 
         # To pass diagnostics data back to our parent
         self._diag_collect: bool = flags.get(EliteCloudApiFlag.DIAGNOSTICS_COLLECT, False)
-        self._diag_history: list[EliteCloudHistoryItem] = []
-        self._diag_details: dict[str, EliteCloudHistoryDetail] = {}
-        self._diag_counters: dict[str, int] = {}
+        self._diag_history: list[EliteCloudHistoryItem] = list()
+        self._diag_details: dict[str, EliteCloudHistoryDetail] = dict()
+        self._diag_counters: dict[str, int] = dict()
         self._diag_durations: dict[int, int] = { n: 0 for n in range(10) }
 
 
@@ -127,9 +149,18 @@ class AsyncEliteCloudWaterApi:
         self.logout()
 
         # Cleanup
+        if self._renew_task is not None:
+            self._renew_task.stop()
+
         if self._http_client is not None and self._http_client_close:
             self._http_client.close()
             self._http_client = None
+
+        if self._ws_task is not None:
+            self._ws_task.stop()
+
+        if self._ws_rsp_task is not None:
+            self._ws_rsp_task.stop()
 
 
     def login(self):
@@ -148,38 +179,27 @@ class AsyncEliteCloudWaterApi:
         """Login to Elite Cloud servers by trying each of the possible login methods"""        
 
         # First try to keep using the access token
-        # Next, try to refresh that token.
+        # Next, try to renew that token.
         # Finally try the Auth API login method
         error = None
-        methods = [LoginMethod.ACCESS_TOKEN, LoginMethod.REFRESH_TOKEN, LoginMethod.AUTH_API]
+        methods = [LoginMethod.ACCESS_TOKEN, LoginMethod.RENEW_TOKEN, LoginMethod.AUTH_API]
         for method in methods:
             try:
                 match method:
-                    case LoginMethod.ACCESS_TOKEN:
-                        # Try to keep using the Access Token
-                        success = self._login_access_token()
-
-                    case LoginMethod.REFRESH_TOKEN:
-                        # Try to refresh the token
-                        success = self._login_refresh_token()
-
-                    case LoginMethod.AUTH_API:
-                        # Try to do a new login with username+password
-                        success = self._login_auth_api()
-
-                    case _:
-                        success = False
+                    case LoginMethod.ACCESS_TOKEN: success = self._login_access_token()
+                    case LoginMethod.RENEW_TOKEN:  success = self._login_renew_token()
+                    case LoginMethod.AUTH_API:     success = self._login_auth_api()
+                    case _:                        success = False
 
                 if success:
-                    # if we reached this point then a login method succeeded
-                    return 
+                    return  # if we reached this point then a login method succeeded
             
             except Exception as ex:
                 _LOGGER.debug(str(ex))
                 error = ex
 
-                # Clear any previous login tokens before trying the next method
-                self._logout(context="login", method=method)
+            # Clear any previous login tokens before trying the next method
+            self._logout(context="login", method=method)
 
         # if we reached this point then all methods failed.
         if error:
@@ -190,13 +210,13 @@ class AsyncEliteCloudWaterApi:
         """Inspect whether the access token is still valid"""
 
         if self._access_token is None or self._access_exp_ts is None:
-            # No acces-token to check; silently continue to the next login method (token refresh)
+            # No acces-token to check; silently continue to the next login method (renew-token)
             return False
 
         # inspect the exp field inside the access_token
         if self._access_exp_ts - ACCESS_TOKEN_EXPIRE_MARGIN < utcnow_ts():
             _LOGGER.debug(f"Access-Token expired")
-            return False    # silently continue to the next login method (token refresh)
+            return False    # silently continue to the next login method (renew-token)
 
         # Re-use this access token
         dt = utcnow_dt()
@@ -211,19 +231,21 @@ class AsyncEliteCloudWaterApi:
         return True
 
 
-    def _login_refresh_token(self) -> bool:
-        """Attempty to refresh the access token"""
+    def _login_renew_token(self) -> bool:
+        """Attempty to renew the access token"""
 
         if not self._device_token:
             # No device-token; silently continue to the next login method
             return False
         
-        # Don't bother to check the contents of the device token, 
-        # just attempt to request a new access token via the device token
-        _LOGGER.debug(f"Try refresh the access-token")
+        # inspect the exp field inside the access_token
+        if self._device_exp_ts - DEVICE_TOKEN_EXPIRE_MARGIN < utcnow_ts():
+            _LOGGER.debug(f"Device-Token expired")
+            return False    # silently continue to the next login method (auth-api)
 
+        _LOGGER.debug(f"Try renew the access-token")
         result = self._http_request(
-            context = f"login access_token refresh",
+            context = f"login access_token renew",
             request = {
                 "method": "GET",
                 "url": AUTH_API_URL + '/user/token/new/',
@@ -233,17 +255,17 @@ class AsyncEliteCloudWaterApi:
             },
         )
         self._access_token = result.get('access_token')
-        self._access_exp_ts = self._get_expire(self._access_token)
+        self._access_exp_ts = float(self._get_jwt(self._access_token, 'exp', 0))
 
         if not self._access_token:
-            error = f"No tokens found in response from token refresh"
+            error = f"No tokens found in response from token renew"
             _LOGGER.debug(error)    # logged as warning after last retry
             raise EliteCloudAuthError(error)
         
-        # The refresh of the tokens succeeded. Schedule the next refresh
+        # The renew of the tokens succeeded. Schedule the next renew
         self._login_time = utcnow_dt()
 
-        _LOGGER.info(f"Refreshed the access-token")
+        _LOGGER.info(f"Renewed the access-token")
         return self._login_finalize()
 
 
@@ -264,7 +286,8 @@ class AsyncEliteCloudWaterApi:
             },            
         )
         self._access_token = result.get('access_token')
-        self._access_exp_ts = self._get_expire(self._access_token)
+        self._access_exp_ts = float(self._get_jwt(self._access_token, 'exp', 0))
+        self._user_uuid = self._get_jwt(self._access_token, 'uid')
 
         if not self._access_token:
             error = f"No tokens found in response from login"
@@ -282,22 +305,7 @@ class AsyncEliteCloudWaterApi:
     def _login_finalize(self) -> bool:
         """Common functionality that needs to be performed regardless of the type of login"""
 
-        # If not already done, fetch user profile
-        if self._user_uuid is None:
-            _LOGGER.debug(f"Retrieve profile for user '{self._username}'")
-            result = self._http_request(
-                context = f"login user-profile",
-                request = {
-                    "method": "GET",
-                    "url": AUTH_API_URL + f'/user/profile/',
-                },
-            )
-            self._user_uuid = result.get('uuid')
-
-        # If needed, register a new user device
-        if self._device_id is None:
-            self._device_id = str(uuid.uuid4())
-
+        # Get device uuid
         if self._device_uuid is None:
             result = self._http_request(
                 context = f"login device-new",
@@ -330,48 +338,58 @@ class AsyncEliteCloudWaterApi:
             },            
         )
         self._device_token = result.get('token')
-        self._device_exp_ts = self._get_expire(self._device_token)
+        self._device_exp_ts = float(self._get_jwt(self._device_token, 'exp', 0))
 
         if not self._device_token:
             error = f"No device token found in response from login"
             _LOGGER.debug(error)    # logged as warning after last retry
             raise EliteCloudAuthError(error)
 
-        # Schedule the next refresh of the access token
-        self._refresh_schedule = self._access_exp_ts - ACCESS_TOKEN_EXPIRE_MARGIN
+        # Schedule the next renew of the access token
+        self._renew_schedule = self._access_exp_ts - ACCESS_TOKEN_EXPIRE_MARGIN
 
-        # If needed, start our login_refresh_handler thread
-        if self._refresh_handler_start and self._refresh_task is None:
-            self._refresh_task = TaskHelper()
-            self._refresh_task.start(self._login_refresh_handler)
+        # If needed, start our login_renew_handler thread
+        if self._renew_handler_start and self._renew_task is None:
+            self._renew_task = TaskHelper(self._login_renew_handler)
+            self._renew_task.start()
+
+        # If needed, start our interal websocket response handler
+        if self._ws_rsp_task is None:
+            self._ws_rsp_task = TaskHelper(self._ws_rsp_handler)
+            self._ws_rsp_task.start()
+
+        # if needed, start our websocket_handler thread
+        if self._ws_task is None:
+            self._ws_task = TaskHelper(self._ws_handler)
+            self._ws_task.start()
 
         return True
 
 
-    def _login_refresh_handler(self) -> bool:
+    def _login_renew_handler(self) -> bool:
         """
-        Parallel task that will refresh the access token when scheduled.
+        Parallel task that will renew the access token when scheduled.
         """
-        _LOGGER.debug(f"Token refresh handler started")
+        _LOGGER.debug(f"Token renew handler started")
 
-        while not self._refresh_task.is_stop_requested():
+        while not self._renew_task.is_stop_requested():
             try:
                 # Wait until access token is almost expired, or wait at least 1 minute
-                exp_timestamp = self._refresh_schedule or 0
+                exp_timestamp = self._renew_schedule or 0
                 now_timestamp = utcnow_ts()
                 delay_seconds = max(math.ceil(exp_timestamp - now_timestamp), 60)
 
-                if self._refresh_task.wait_for_stop(timeout = delay_seconds):
+                if self._renew_task.wait_for_stop(timeout = delay_seconds):
                     # Stop event detected
                     pass
                 else:
-                    # Reuse access token, refresh it, or re-login
+                    # Reuse access token, renew it, or re-login
                     self.login()
 
             except Exception as ex:
-                _LOGGER.debug(f"Token refresh handler caught exception: {ex}")
+                _LOGGER.debug(f"Token renew handler caught exception: {ex}")
         
-        _LOGGER.debug(f"Token refresh handler stopped")
+        _LOGGER.debug(f"Token renew handler stopped")
         return True
 
 
@@ -383,10 +401,15 @@ class AsyncEliteCloudWaterApi:
         with self._login_lock:
             self._logout(context="", method=None)
 
-            # Stop token refresh_handler
-            if self._refresh_task is not None:
-                self._refresh_task.stop()
-                self._refresh_task = None
+            # Stop token renew
+            if self._renew_task is not None:
+                self._renew_task.stop()
+                self._renew_task = None
+
+            # stop websocket listener
+            if self._ws_task is not None:
+                self._ws_task.stop()
+                self._ws_task = None
 
 
     def _logout(self, context: str, method: LoginMethod|None = None):
@@ -402,17 +425,17 @@ class AsyncEliteCloudWaterApi:
         if self._login_time and method not in [LoginMethod.ACCESS_TOKEN]:
            _LOGGER.debug(f"Logout")
 
-        # Instead of closing we will simply forget all tokens. The result is that on a next
-        # request, the client will act like it is a new one.
+        # Do not close the http-client. Instead we will simply forget the access-token. 
+        # On a next request, the client will act like it is a new one.
         self._access_token = None
         self._access_exp_ts = None
 
-        # Do not clear refresh token when called in a 'login' context and when we were 
-        # only checking the access_token
+        # Do not clear device token when called in a 'login' context and when we were 
+        # only checking the access_token. It is needed for renew-token
         if not (context.startswith("login") and method in [LoginMethod.ACCESS_TOKEN]):
-            self._refresh_token = None
             self._device_token = None
-            self._refresh_timestamp = 0
+            self._device_exp_ts = None
+            self._renew_timestamp = 0
 
         # Do not clear login_method when called in a 'login' context, as it interferes with 
         # the loop iterating all login methods.
@@ -421,28 +444,76 @@ class AsyncEliteCloudWaterApi:
             self._login_time = None
 
 
-    def _get_expire(self, token: str|None) -> float:
-        """Return the exp field from the token"""
+    def _get_jwt(self, token: str|None, field: str, default:Any=None) -> float:
+        """Return the field from the token"""
         try:
             payload = jwt.decode(jwt=token, options={"verify_signature": False})
-            
-            return float(payload.get("exp", 0))
+            return payload.get(field, default)
         except:            
-            return float(0)
+            return default
 
 
-    def fetch_sites(self) -> list[dict]:
+    def fetch_server_status(self) -> list[dict]:
         """
-        Get sites
+        Get server status
+        """
+        # Does not require a prior login...
+
+        _LOGGER.debug(f"Retrieve server status")
+        return self._http_request(
+            context = f"fetch server-status",
+            request = {
+                "method": "GET",
+                "url": SERVER_API_URL + f'/serverstatus/api/serverstatus/?format=json',
+            },
+        )
+    
+
+    def fetch_site_invited(self) -> list[dict]:
+        """
+        Get sites the user is invited to
         """
         self.login()
 
-        _LOGGER.debug(f"Retrieve sites for user '{self._username}' ({self._user_uuid})")
+        _LOGGER.debug(f"Retrieve invited sites for user '{self._username}' ({self._user_uuid})")
         result = self._http_request(
             context = f"fetch sites",
             request = {
                 "method": "GET",
-                "url": PANEL_API_URL + f'/site/own/?search=',
+                "url": PANEL_API_URL + f'/site/invited/',
+            },
+        )
+        return result
+
+
+    def accept_site_invited(self, site_uuid:str):
+        """
+        Accept an invite to the site
+        """
+        self.login()
+
+        _LOGGER.debug(f"accept site invite for {site_uuid}")
+        self._http_request(
+            context = f"accept site-invite {site_uuid}",
+            request = {
+                "method": "POST",
+                "url": PANEL_API_URL + f'/site/invitation/{site_uuid}/',
+            },
+        )
+
+
+    def fetch_sites(self) -> list[dict]:
+        """
+        Get all sites the user has access to.
+        """
+        self.login()
+
+        _LOGGER.debug(f"Retrieve own sites for user '{self._username}' ({self._user_uuid})")
+        result = self._http_request(
+            context = f"fetch sites",
+            request = {
+                "method": "GET",
+                "url": PANEL_API_URL + f'/site/own/',
             },
         )
 
@@ -455,24 +526,24 @@ class AsyncEliteCloudWaterApi:
                 panel_mac = site.get('panel',{}).get('mac_address'),
                 panel_serial = site.get('panel',{}).get('serial_no'),
             )
-            self._sites[site.uuid] = site
+            self._sites.append(site)
 
         # Return entire site list
         return result
 
 
-    def fetch_site_details(self, site_uuid) -> list[dict]:
+    def fetch_site_resources(self, site_uuid:str) -> list[dict]:
         """
         Get sites
         """
         self.login()
 
-        if not site_uuid in self._sites:
+        site = self._sites.get_by_uuid(site_uuid)
+        if site is None:
             error = f"No site found with id '{site_uuid}'"
             _LOGGER.info(error)
             raise EliteCloudParamError(error)
 
-        site = self._sites.get(site_uuid)
         result = {}
 
         _LOGGER.debug(f"Retrieve site areas for '{site.name}' ({site.uuid})")
@@ -505,46 +576,77 @@ class AsyncEliteCloudWaterApi:
         return result
 
 
-    def on_site_data(self, site_uud: str, callback):
-        """
-        Register a callback function that will fire:
-        - Once initially
-        - On each change of the profile
-        """
-        self.login()
-
-        # _LOGGER.info(f"Register watch on profile for user '{self._username}' ({self._user_id})")
-        # return await self._firestore_request(
-        #     context = f"watch {self._user_id}",
-        #     request = {
-        #         "method": FirestoreMethod.WATCH,
-        #         "path": f"profiles/{self._user_id}",
-        #     },
-        #     callback = callback,
-        # )
-
-
-    def fetch_site_data(self, site_uuid: str):
+    def fetch_site_status(self, site_uuid: str):
         """
         Get gatweway
         """
         self.login()
 
-        # _LOGGER.debug(f"Retrieve gateway '{gateway_id}'")
-        # return await self._firestore_request(
-        #     context = f"gateway {gateway_id}",
-        #     request = {
-        #         "method": "FirestoreDoc",
-        #         "path": f"gateways/{gateway_id}",
-        #     },
-        # )
+        # If not already done, subscribe to site status
+        self._subscribe_site_status(site_uuid)
+
+        # Fetch most recent status
+        for retry in range(5):
+            status = self._sites_status.get(site_uuid)
+            if status is not None:
+                return status
+            
+            time.sleep(1)
+
+        return None
+
+
+    def subscribe_site_status(self, site_uuid: str, callback):
+        """
+        Register a callback function that will fire when:
+        - On each change of the status
+        """
+        self.login()
+
+        # Remember callback (overwrite any previous one)
+        self._sites_callbacks[site_uuid] = callback
+
+        # Subscribe to site status messages. 
+        # May lead to nearly immediate call to the callback.
+        self._subscribe_site_status(site_uuid)
+
+
+    def _subscribe_site_status(self, site_uuid: str, force:bool=False):
+        """
+        Internal function, not affected by login_lock
+        """
+
+        # Already subscribed?
+        if site_uuid in self._sites_subscribed and not force:
+            return
+
+        site = self._sites.get_by_uuid(site_uuid)
+        if site is None:
+            error = f"No site found with id '{site_uuid}'"
+            _LOGGER.info(error)
+            raise EliteCloudParamError(error)
+
+        # Queue the request to subscribe to status changes
+        _LOGGER.debug(f"Subscribe to site status updates for site '{site.name}' ({site.uuid})")
+        context = f"subscribe site-status {site.uuid}"
+        request = {
+            "json": {
+                "type": "subscribe",
+                "body": {
+                    "mac_address": site.panel_mac,
+                    "serial_no": site.panel_serial,
+                },
+            }
+        }
+        self._ws_req_queue.put(request)
+    
+        # Remember we are subscribed
+        self._sites_subscribed.add(site_uuid)
 
 
     def _http_request(self, context, request):
         """
         GET or POST a request for JSON data
-
-        Only used for login and token refresh
         """
 
         # Auto add authorization header
@@ -612,11 +714,11 @@ class AsyncEliteCloudWaterApi:
         
         elif "json" in response:
             data = response["json"]
-            is_success = data.get("is_success", False)
+            is_success = data.get("is_success", True)
             status_code = data.get("status_code")
             message = data.get("message")
 
-            if not is_success:
+            if not is_success and status_code >= 300:
                 error = f"Unable to perform request, response contains {status_code} '{message}' while trying to reach {request["url"]}"
                 _LOGGER.debug(error)
 
@@ -635,6 +737,142 @@ class AsyncEliteCloudWaterApi:
         else:
             return None
     
+
+    def _ws_handler(self):
+        """
+        Parallel task that will handle all websocket operations
+        """
+        _LOGGER.debug(f"Websocket handler started")
+
+        while not self._ws_task.is_stop_requested():
+            # Wait until we get an access token
+            if self._access_token is None:
+                self._ws_task.wait_for_stop(timeout=1)
+                continue
+
+            # (re-)connect
+            url = PANEL_API_WS + '/ws/panel/'
+            headers = {
+                "Authorization": f"Bearer {self._access_token}",
+                "Origin": url,
+            }
+            with httpx_ws.connect_ws(url=url, headers=headers) as ws:
+
+                # Queue any subscribe requests we previously had
+                for site_uuid in self._sites_subscribed:
+                    self._subscribe_site_status(site_uuid, force=True)
+
+                # Process requests and responses
+                while not self._ws_task.is_stop_requested():
+                    
+                    req_found = False
+                    try:
+                        # Send if a request is queued
+                        if not self._ws_req_queue.empty():
+                            request = self._ws_req_queue.get()
+                            req_data = request["json"]
+
+                            ws.send_json(req_data)
+                            #_LOGGER.debug(f"req: {req_data}")
+
+                            req_found = True
+                    
+                    except (queue.Empty, TimeoutError):
+                        pass
+
+                    except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
+                        break   # Exit inner loop and reconnect in outer loop
+
+                    except Exception as ex:
+                        _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
+                        break   # disconnect and reconnect in outer loop
+                    
+                    try:
+                        # If we could have more requests waiting, only get already available reponse,
+                        # otherwise wait and listen for a response to come in
+                        rsp_data = ws.receive_json(timeout=0 if req_found else 1)
+                        #_LOGGER.debug(f"rsp: {rsp_data}")
+
+                        response = {
+                            "json": rsp_data,
+                        }
+                        self._ws_rsp_queue.put(response)
+                    
+                    except (queue.Empty, TimeoutError):
+                        pass
+                    
+                    except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
+                        break   # Exit inner loop and reconnect in outer loop
+
+                    except Exception as ex:
+                        _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
+                        break   # disconnect and reconnect in outer loop
+
+        _LOGGER.debug(f"Websocket handler stopped")
+
+
+    def _ws_rsp_handler(self):
+        """
+        Parallel task that will handle all responses received via websocket
+        """
+        _LOGGER.debug(f"Websocket response handler started")
+
+        while not self._ws_rsp_task.is_stop_requested():
+            try:
+                # Wait if no response is queued
+                if self._ws_rsp_queue.empty():
+                    self._ws_rsp_task.wait_for_stop(timeout=1)
+                    continue
+               
+                # Get the reponse and process it
+                response = self._ws_rsp_queue.get()
+                rsp_data = response.get("json", {})
+                rsp_type = rsp_data.get("type", "")
+                rsp_payload = rsp_data.get("payload", {})
+
+                match rsp_type:
+                    case "ready":
+                        # Received after a new connect.
+                        is_ready = rsp_payload.get("is_ready", False)
+                        if is_ready:
+                            _LOGGER.info("Websocket connected to remote server")
+
+                    case "subscribe":
+                        # Received after a successfull subscribe. Ignore
+                        is_success = rsp_payload.get("is_success", False)
+                        serial = rsp_payload.get("serial_no", "")
+
+                        site = self._sites.get_by_serial(serial)
+                        if is_success and site is not None:
+                            _LOGGER.info(f"Subscribed to status updates for site '{site.name}' ({site.uuid})")
+
+                    case "status":
+                        # A new status is received
+                        status = rsp_payload.get("body", {})
+                        panel = rsp_payload.get("panel", {})
+                        panel_serial = panel.get("serial_no", "")
+
+                        site = self._sites.get_by_serial(panel_serial)
+                        if site is not None:
+                            _LOGGER.info(f"Received status update for '{site.name}' ({site.uuid})")
+
+                            # Remember the most recent status for each site
+                            self._sites_status[site.uuid] = status
+
+                            # Call status callback for this site (if any)
+                            callback = self._sites_callbacks.get(site.uuid)
+                            if callback is not None:
+                                callback(site, status)
+
+            except queue.Empty:
+                pass
+            
+            except Exception as ex:
+                _LOGGER.debug(f"WebSocket response handler caught exception: {ex}")
+                pass
+
+        _LOGGER.debug(f"Websocket response handler stopped")
+
 
     def _add_diagnostics(self, dt: datetime, context: str, request: dict|None, response: dict|None, token: dict|None = None):
         """Gather diagnostics"""

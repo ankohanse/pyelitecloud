@@ -3,8 +3,10 @@ from .api_async import (
 )
 from .api_sync import (
     EliteCloudApi, 
+    EliteCloudApiFlag,
 )
 from .data import (
+    EliteCloudSite,
     EliteCloudConnectError, 
     EliteCloudAuthError, 
     EliteCloudDataError, 
