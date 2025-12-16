@@ -403,11 +403,6 @@ class AsyncEliteCloudApi:
                 await self._renew_task.stop()
                 self._renew_task = None
 
-            # stop websocket listener
-            if self._ws_task is not None:
-                await self._ws_task.stop()
-                self._ws_task = None
-
 
     async def _logout(self, context: str, method: LoginMethod|None = None):
         """Internal logout handler"""
@@ -423,7 +418,7 @@ class AsyncEliteCloudApi:
            _LOGGER.debug(f"Logout")
 
         # Do not close the http-client. Instead we will simply forget the access-token. 
-        # On a next request, the client will act like it is a new one.
+        # On a next request, the http client will act like it is a new one.
         self._access_token = None
         self._access_exp_ts = None
 
@@ -439,6 +434,11 @@ class AsyncEliteCloudApi:
         if not context.startswith("login"):
             self._login_method = None
             self._login_time = None
+    
+        # stop websocket listener; we'll start it again when we get a new access-token
+        if self._ws_task is not None:
+            await self._ws_task.stop()
+            self._ws_task = None
 
 
     def _get_jwt(self, token: str|None, field: str, default:Any=None) -> float:
