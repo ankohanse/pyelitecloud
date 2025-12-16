@@ -70,10 +70,13 @@ def main():
             api.close()
 
 
-def on_site_status(site: EliteCloudSite, status: dict):
+def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict):
     logger.info("")
-    logger.info(f"site '{site.name}' status:")
-    logger.info(json.dumps(status, indent=4))
+    logger.info(f"site '{site.name}' {section} {id}:")
+    if section == "status":
+        logger.info(json.dumps(status, indent=4))
+    else:
+        logger.info(json.dumps(status))
 
 
 # main loop

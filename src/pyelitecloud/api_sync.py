@@ -406,11 +406,6 @@ class EliteCloudApi:
                 self._renew_task.stop()
                 self._renew_task = None
 
-            # stop websocket listener
-            if self._ws_task is not None:
-                self._ws_task.stop()
-                self._ws_task = None
-
 
     def _logout(self, context: str, method: LoginMethod|None = None):
         """Internal logout handler"""
@@ -426,7 +421,7 @@ class EliteCloudApi:
            _LOGGER.debug(f"Logout")
 
         # Do not close the http-client. Instead we will simply forget the access-token. 
-        # On a next request, the client will act like it is a new one.
+        # On a next request, the http client will act like it is a new one.
         self._access_token = None
         self._access_exp_ts = None
 
@@ -442,6 +437,11 @@ class EliteCloudApi:
         if not context.startswith("login"):
             self._login_method = None
             self._login_time = None
+    
+        # stop websocket listener; we'll start it again when we get a new access-token
+        if self._ws_task is not None:
+            self._ws_task.stop()
+            self._ws_task = None
 
 
     def _get_jwt(self, token: str|None, field: str, default:Any=None) -> float:
@@ -847,22 +847,52 @@ class EliteCloudApi:
                             _LOGGER.info(f"Subscribed to status updates for site '{site.name}' ({site.uuid})")
 
                     case "status":
-                        # A new status is received
-                        status = rsp_payload.get("body", {})
+                        # A complete status is received
                         panel = rsp_payload.get("panel", {})
                         panel_serial = panel.get("serial_no", "")
 
+                        status_id = ""
+                        status_val = rsp_payload.get("body", {})
+                        status_section = rsp_type
+
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
-                            _LOGGER.info(f"Received status update for '{site.name}' ({site.uuid})")
+                            _LOGGER.info(f"Received update for '{site.name}' {status_section}")
 
-                            # Remember the most recent status for each site
-                            self._sites_status[site.uuid] = status
+                            # Update our persisted sites statuses
+                            self._sites_status[site.uuid] = status_val
 
                             # Call status callback for this site (if any)
                             callback = self._sites_callbacks.get(site.uuid)
                             if callback is not None:
-                                callback(site, status)
+                                callback(site, status_section, status_id, status_val)
+
+                    case "area" | "input" | "output":
+                        # A status item is received
+                        panel = rsp_payload.get("panel", {})
+                        panel_serial = panel.get("serial_no", "")
+
+                        body = rsp_payload.get("body", {})
+                        status_id = body.get("id", "")
+                        status_val = body.get("status", "")
+                        status_section = rsp_type
+
+                        site = self._sites.get_by_serial(panel_serial)
+                        if site is not None:
+                            _LOGGER.info(f"Received update for '{site.name}' {status_section} {status_id}: json.dumps({status_val})")
+
+                            # Update our persisted sites statuses
+                            cur_site = self._sites_status.get(site.uuid, {})
+                            cur_section = cur_site.get(rsp_type, [])
+                            cur_item = next( (i for i in cur_section if i.get("id")==status_id), None )
+
+                            if cur_item is not None:
+                                cur_item["status"] = status_val
+
+                            # Call status callback for this site (if any)
+                            callback = self._sites_callbacks.get(site.uuid)
+                            if callback is not None:
+                                callback(site, status_section, status_id, status_val)
 
             except queue.Empty:
                 pass
