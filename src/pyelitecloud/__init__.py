@@ -13,6 +13,10 @@ from .data import (
     EliteCloudParamError,
     EliteCloudError, 
 )
+from .diagnostics import (
+    EliteCloudHistoryDetail, 
+    EliteCloudHistoryItem,
+)
 
 # for unit tests
 from .data import (
