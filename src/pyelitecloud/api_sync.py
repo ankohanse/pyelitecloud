@@ -35,12 +35,15 @@ from .data import (
     EliteCloudSite,
     EliteCloudSites,
     LoginMethod,
-    EliteCloudHistoryDetail, 
-    EliteCloudHistoryItem,
     EliteCloudAuthError, 
     EliteCloudConnectError, 
     EliteCloudDataError, 
     EliteCloudParamError,
+)
+from .diagnostics import (
+    EliteCloudDiagnostics,
+    EliteCloudHistoryDetail, 
+    EliteCloudHistoryItem,
 )
 from .tasks import (
     AsyncTaskHelper,
@@ -115,13 +118,12 @@ class EliteCloudApi:
         self._login_lock = threading.Lock()
 
         # To pass diagnostics data back to our parent
-        self._diag_collect: bool = flags.get(EliteCloudApiFlag.DIAGNOSTICS_COLLECT, False)
-        self._diag_history: list[EliteCloudHistoryItem] = list()
-        self._diag_details: dict[str, EliteCloudHistoryDetail] = dict()
-        self._diag_durations: dict[int, int] = { n: 0 for n in range(10) }
-        self._diag_methods: dict[str, int] = dict()
-        self._diag_counters: dict[str, int] = dict()
+        self._diagnostics = EliteCloudDiagnostics(enabled=flags.get(EliteCloudApiFlag.DIAGNOSTICS_COLLECT, False))
 
+
+    @property
+    def diagnostics(self) -> dict:
+        return self._diagnostics.get()
 
     @property
     def user_uuid(self) -> str:
@@ -229,7 +231,7 @@ class EliteCloudApi:
             "access_token": self._access_token,
             "access_expire": datetime.fromtimestamp(self._access_exp_ts, timezone.utc)
         }
-        self._add_diagnostics(dt, context, None, None, token)
+        self._diagnostics.add(dt, context, None, None, token)
 
         #AJH
         _LOGGER.debug(f"Reuse the access-token")
@@ -393,7 +395,7 @@ class EliteCloudApi:
                 delay_seconds = max(math.ceil(exp_timestamp - now_timestamp), 60)
 
                 #AJH
-                _LOGGER.debug(f"Token renew scheduled for {datetime.fromtimestamp(exp_timestamp)} ({delay_seconds} seconds from now)")
+                _LOGGER.debug(f"Next token renew scheduled for {datetime.fromtimestamp(exp_timestamp)} ({delay_seconds} seconds from now)")
 
                 self._renew_task.wait_for_wakeup(timeout = delay_seconds)
 
@@ -652,7 +654,7 @@ class EliteCloudApi:
                 },
             }
         }
-        self._add_diagnostics(dt, context, request, None)
+        self._diagnostics.add(dt, context, request, None)
 
         # Queue the request and remember we are subscribed
         self._request_queue.put(request)
@@ -707,7 +709,7 @@ class EliteCloudApi:
             raise EliteCloudConnectError(error)
 
         # Save the diagnostics if requested
-        self._add_diagnostics(dt, context, request, response)
+        self._diagnostics.add(dt, context, request, response)
         
         # Check response
         if not response["success"]:
@@ -912,7 +914,7 @@ class EliteCloudApi:
                 # Add diagnostics if configured
                 dt = utcnow_dt()
                 context = f"Receive {rsp_type}"
-                self._add_diagnostics(dt, context, None, response)
+                self._diagnostics.add(dt, context, None, response)
 
             except queue.Empty:
                 self._response_task.wait_for_wakeup(timeout=1)
@@ -925,87 +927,3 @@ class EliteCloudApi:
         _LOGGER.debug(f"Response handler stopped")
 
 
-    def _add_diagnostics(self, dt: datetime, context: str, request: dict|None, response: dict|None, token: dict|None = None):
-        """Gather diagnostics"""
-
-        if not self._diag_collect:
-            return
-
-        method = request.get("method", None) if request is not None else response.get("method", None) if response is not None else None
-        method = method.replace("GET", "HttpGet").replace("POST", "HttpPost") if method is not None else None
-
-        duration = response.get("elapsed", None) if response is not None else None
-        duration = round(duration, 0) if duration is not None else None
-        
-        history_item = EliteCloudHistoryItem.create(dt, context, request, response, token)
-        history_detail = EliteCloudHistoryDetail.create(dt, context, request, response, token)
-
-        # Call durations
-        if duration is not None:
-            if duration in self._diag_durations:
-                self._diag_durations[duration] += 1
-            else:
-                self._diag_durations[duration] = 1
-
-        # Call method
-        if method is not None:
-            if method in self._diag_methods:
-                self._diag_methods[method] += 1
-            else:
-                self._diag_methods[method] = 1
-
-        # Call counters
-        if context in self._diag_counters:
-            self._diag_counters[context] += 1
-        else:
-            self._diag_counters[context] = 1
-
-        # Call history        
-        self._diag_history.append(history_item)
-        while len(self._diag_history) > 64:
-            self._diag_history.pop(0)
-
-        # Call details
-        self._diag_details[context] = history_detail
-
-
-    def get_diagnostics(self) -> dict[str, Any]:
-        """Return the gathered diagnostics"""
-
-        data = {
-            "login_time": self._login_time,
-            "login_method": self._login_method,
-        }
-
-        calls_total = sum([ n for key, n in self._diag_counters.items() ]) or 1
-        calls_counter = { key: n for key, n in self._diag_counters.items() }
-        calls_percent = { key: round(100.0 * n / calls_total, 2) for key, n in calls_counter.items() }
-
-        durations_total = sum(self._diag_durations.values()) or 1
-        durations_counter = dict(sorted(self._diag_durations.items()))
-        durations_percent = { key: round(100.0 * n / durations_total, 2) for key, n in durations_counter.items() }
-
-        methods_total = sum(self._diag_methods.values()) or 1
-        methods_counter = dict(sorted(self._diag_methods.items()))
-        methods_percent = { key: round(100.0 * n / methods_total, 2) for key, n in methods_counter.items() }
-        
-        return {
-            "data": data,
-            "diagnostics": {
-                "dt": utcnow_dt(),
-                "durations": {
-                    "counter": durations_counter,
-                    "percent": durations_percent,
-                },
-                "methods": {
-                    "counter": methods_counter,
-                    "percent": methods_percent,
-                },
-                "calls": {
-                    "counter": calls_counter,
-                    "percent": calls_percent,
-                },
-            },
-            "history": self._diag_history,
-            "details": self._diag_details,
-        }
