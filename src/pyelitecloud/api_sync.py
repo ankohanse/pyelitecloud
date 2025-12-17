@@ -106,10 +106,10 @@ class EliteCloudApi:
 
         # Websockets Client
         self._ws_task = None
-        self._ws_rsp_task = None
+        self._response_task = None
 
-        self._ws_req_queue: queue.Queue = queue.Queue()
-        self._ws_rsp_queue: queue.Queue = queue.Queue()
+        self._request_queue: queue.Queue = queue.Queue()
+        self._response_queue: queue.Queue = queue.Queue()
 
         # Locks to protect certain operations from being called from multiple threads
         self._login_lock = threading.Lock()
@@ -118,8 +118,9 @@ class EliteCloudApi:
         self._diag_collect: bool = flags.get(EliteCloudApiFlag.DIAGNOSTICS_COLLECT, False)
         self._diag_history: list[EliteCloudHistoryItem] = list()
         self._diag_details: dict[str, EliteCloudHistoryDetail] = dict()
-        self._diag_counters: dict[str, int] = dict()
         self._diag_durations: dict[int, int] = { n: 0 for n in range(10) }
+        self._diag_methods: dict[str, int] = dict()
+        self._diag_counters: dict[str, int] = dict()
 
 
     @property
@@ -159,8 +160,8 @@ class EliteCloudApi:
         if self._ws_task is not None:
             self._ws_task.stop()
 
-        if self._ws_rsp_task is not None:
-            self._ws_rsp_task.stop()
+        if self._response_task is not None:
+            self._response_task.stop()
 
 
     def login(self):
@@ -211,6 +212,9 @@ class EliteCloudApi:
 
         if self._access_token is None or self._access_exp_ts is None:
             # No acces-token to check; silently continue to the next login method (renew-token)
+            #AJH
+            _LOGGER.debug(f"No Access-Token")
+
             return False
 
         # inspect the exp field inside the access_token
@@ -227,7 +231,8 @@ class EliteCloudApi:
         }
         self._add_diagnostics(dt, context, None, None, token)
 
-        # _LOGGER.debug(f"Reuse the access-token")
+        #AJH
+        _LOGGER.debug(f"Reuse the access-token")
         return True
 
 
@@ -236,6 +241,9 @@ class EliteCloudApi:
 
         if not self._device_token:
             # No device-token; silently continue to the next login method
+            #AJH
+            _LOGGER.debug(f"No Device-Token")
+
             return False
         
         # inspect the exp field inside the access_token
@@ -325,7 +333,7 @@ class EliteCloudApi:
                 _LOGGER.debug(error)    # logged as warning after last retry
                 raise EliteCloudAuthError(error)
 
-        # Get device token
+        # Get device token based on the access-token (needs double authentication)
         result = self._http_request(
             context = f"login device-token",
             request = {
@@ -354,14 +362,16 @@ class EliteCloudApi:
             self._renew_task.start()
 
         # If needed, start our interal websocket response handler
-        if self._ws_rsp_task is None:
-            self._ws_rsp_task = TaskHelper(self._ws_rsp_handler)
-            self._ws_rsp_task.start()
+        if self._response_task is None:
+            self._response_task = TaskHelper(self._response_handler)
+            self._response_task.start()
 
         # if needed, start our websocket_handler thread
         if self._ws_task is None:
             self._ws_task = TaskHelper(self._ws_handler)
             self._ws_task.start()
+        else:
+            self._ws_task.wakeup()
 
         return True
 
@@ -374,17 +384,18 @@ class EliteCloudApi:
 
         while not self._renew_task.is_stop_requested():
             try:
+                # Reuse access token, renew it, or re-login
+                self.login()
+                
                 # Wait until access token is almost expired, or wait at least 1 minute
                 exp_timestamp = self._renew_schedule or 0
                 now_timestamp = utcnow_ts()
                 delay_seconds = max(math.ceil(exp_timestamp - now_timestamp), 60)
 
-                if self._renew_task.wait_for_stop(timeout = delay_seconds):
-                    # Stop event detected
-                    pass
-                else:
-                    # Reuse access token, renew it, or re-login
-                    self.login()
+                #AJH
+                _LOGGER.debug(f"Token renew scheduled for {datetime.fromtimestamp(exp_timestamp)} ({delay_seconds} seconds from now)")
+
+                self._renew_task.wait_for_wakeup(timeout = delay_seconds)
 
             except Exception as ex:
                 _LOGGER.debug(f"Token renew handler caught exception: {ex}")
@@ -439,7 +450,7 @@ class EliteCloudApi:
             self._login_time = None
     
         # stop websocket listener; we'll start it again when we get a new access-token
-        if self._ws_task is not None:
+        if self._ws_task is not None and not context.startswith("ws"):
             self._ws_task.stop()
             self._ws_task = None
 
@@ -599,6 +610,7 @@ class EliteCloudApi:
     def subscribe_site_status(self, site_uuid: str, callback):
         """
         Register a callback function that will fire when:
+        - Once immediately after subscribing
         - On each change of the status
         """
         self.login()
@@ -626,10 +638,12 @@ class EliteCloudApi:
             _LOGGER.info(error)
             raise EliteCloudParamError(error)
 
-        # Queue the request to subscribe to status changes
+        # Prepare the request to subscribe to status changes
         _LOGGER.debug(f"Subscribe to site status updates for site '{site.name}' ({site.uuid})")
+        dt = utcnow_dt()
         context = f"subscribe site-status {site.uuid}"
         request = {
+            "method": "WS",     
             "json": {
                 "type": "subscribe",
                 "body": {
@@ -638,9 +652,10 @@ class EliteCloudApi:
                 },
             }
         }
-        self._ws_req_queue.put(request)
-    
-        # Remember we are subscribed
+        self._add_diagnostics(dt, context, request, None)
+
+        # Queue the request and remember we are subscribed
+        self._request_queue.put(request)
         self._sites_subscribed.add(site_uuid)
 
 
@@ -745,87 +760,87 @@ class EliteCloudApi:
         _LOGGER.debug(f"Websocket handler started")
 
         while not self._ws_task.is_stop_requested():
-            # Wait until we get an access token
-            if self._access_token is None:
-                self._ws_task.wait_for_stop(timeout=1)
-                continue
+            try:
+                # Wait until we get an access token
+                if self._access_token is None:
+                    self._ws_task.wait_for_wakeup(timeout=1)
+                    continue
 
-            # (re-)connect
-            url = PANEL_API_WS + '/ws/panel/'
-            headers = {
-                "Authorization": f"Bearer {self._access_token}",
-                "Origin": url,
-            }
-            with httpx_ws.connect_ws(url=url, headers=headers) as ws:
+                # (re-)connect
+                url = PANEL_API_WS + '/ws/panel/'
+                headers = {
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Origin": url,
+                }
+                with httpx_ws.connect_ws(url=url, headers=headers) as ws:
 
-                # Queue any subscribe requests we previously had
-                for site_uuid in self._sites_subscribed:
-                    self._subscribe_site_status(site_uuid, force=True)
+                    # Queue any subscribe requests we previously had
+                    for site_uuid in self._sites_subscribed:
+                        self._subscribe_site_status(site_uuid, force=True)
 
-                # Process requests and responses
-                while not self._ws_task.is_stop_requested():
-                    
-                    req_found = False
-                    try:
-                        # Send if a request is queued
-                        if not self._ws_req_queue.empty():
-                            request = self._ws_req_queue.get()
+                    # Process requests and responses
+                    while not self._ws_task.is_stop_requested():
+                        
+                        try:
+                            # Send if a request is queued
+                            request = self._request_queue.get_nowait()
                             req_data = request["json"]
 
                             ws.send_json(req_data)
                             #_LOGGER.debug(f"req: {req_data}")
+                        
+                        except (queue.Empty, TimeoutError):
+                            request = None  # Continue below to receive
 
-                            req_found = True
-                    
-                    except (queue.Empty, TimeoutError):
-                        pass
+                        except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
+                            break   # Exit inner loop and reconnect in outer loop
 
-                    except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
-                        break   # Exit inner loop and reconnect in outer loop
+                        except Exception as ex:
+                            _LOGGER.debug(f"WebSocket send handler caught exception: {ex}")
+                            break   # disconnect and reconnect in outer loop
+                        
+                        try:
+                            # If we could have more requests waiting, only get already available reponse,
+                            # otherwise wait and listen for a response to come in
+                            rsp_data = ws.receive_json(timeout=0 if request is not None else 1)
+                            #_LOGGER.debug(f"rsp: {rsp_data}")
 
-                    except Exception as ex:
-                        _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
-                        break   # disconnect and reconnect in outer loop
-                    
-                    try:
-                        # If we could have more requests waiting, only get already available reponse,
-                        # otherwise wait and listen for a response to come in
-                        rsp_data = ws.receive_json(timeout=0 if req_found else 1)
-                        #_LOGGER.debug(f"rsp: {rsp_data}")
+                            response = {
+                                "method": "WS",
+                                "json": rsp_data,
+                            }
+                            self._response_queue.put(response)
+                            self._response_task.wakeup()
+                        
+                        except (queue.Empty, TimeoutError):
+                            pass
+                        
+                        except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
+                            break   # Exit inner loop and reconnect in outer loop
 
-                        response = {
-                            "json": rsp_data,
-                        }
-                        self._ws_rsp_queue.put(response)
-                    
-                    except (queue.Empty, TimeoutError):
-                        pass
-                    
-                    except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
-                        break   # Exit inner loop and reconnect in outer loop
+                        except Exception as ex:
+                            _LOGGER.debug(f"WebSocket receive handler caught exception: {ex}")
+                            break   # disconnect and reconnect in outer loop
 
-                    except Exception as ex:
-                        _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
-                        break   # disconnect and reconnect in outer loop
+            except Exception as ex:
+                _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
+                self._logout(context="ws handler restart")
+                self._renew_task.wakeup()
+                continue   # continue outer loop
 
         _LOGGER.debug(f"Websocket handler stopped")
 
 
-    def _ws_rsp_handler(self):
+    def _response_handler(self):
         """
         Parallel task that will handle all responses received via websocket
         """
-        _LOGGER.debug(f"Websocket response handler started")
+        _LOGGER.debug(f"Response handler started")
 
-        while not self._ws_rsp_task.is_stop_requested():
+        while not self._response_task.is_stop_requested():
             try:
-                # Wait if no response is queued
-                if self._ws_rsp_queue.empty():
-                    self._ws_rsp_task.wait_for_stop(timeout=1)
-                    continue
-               
-                # Get the reponse and process it
-                response = self._ws_rsp_queue.get()
+                # Get the reponse. Will raise exception if nothing there
+                response = self._response_queue.get_nowait()
                 rsp_data = response.get("json", {})
                 rsp_type = rsp_data.get("type", "")
                 rsp_payload = rsp_data.get("payload", {})
@@ -857,7 +872,7 @@ class EliteCloudApi:
 
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
-                            _LOGGER.info(f"Received update for '{site.name}' {status_section}")
+                            _LOGGER.debug(f"Received update for '{site.name}' {status_section}")
 
                             # Update our persisted sites statuses
                             self._sites_status[site.uuid] = status_val
@@ -879,7 +894,7 @@ class EliteCloudApi:
 
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
-                            _LOGGER.info(f"Received update for '{site.name}' {status_section} {status_id}: json.dumps({status_val})")
+                            _LOGGER.debug(f"Received update for '{site.name}' {status_section} {status_id}: {json.dumps(status_val)}")
 
                             # Update our persisted sites statuses
                             cur_site = self._sites_status.get(site.uuid, {})
@@ -894,14 +909,20 @@ class EliteCloudApi:
                             if callback is not None:
                                 callback(site, status_section, status_id, status_val)
 
+                # Add diagnostics if configured
+                dt = utcnow_dt()
+                context = f"Receive {rsp_type}"
+                self._add_diagnostics(dt, context, None, response)
+
             except queue.Empty:
-                pass
+                self._response_task.wait_for_wakeup(timeout=1)
             
             except Exception as ex:
-                _LOGGER.debug(f"WebSocket response handler caught exception: {ex}")
-                pass
+                _LOGGER.debug(f"Response handler caught exception: {ex}")
+                
+            # continue main handler loop
 
-        _LOGGER.debug(f"Websocket response handler stopped")
+        _LOGGER.debug(f"Response handler stopped")
 
 
     def _add_diagnostics(self, dt: datetime, context: str, request: dict|None, response: dict|None, token: dict|None = None):
@@ -910,7 +931,7 @@ class EliteCloudApi:
         if not self._diag_collect:
             return
 
-        method = request.get("method", "unknown") if request is not None else None
+        method = request.get("method", None) if request is not None else response.get("method", None) if response is not None else None
         method = method.replace("GET", "HttpGet").replace("POST", "HttpPost") if method is not None else None
 
         duration = response.get("elapsed", None) if response is not None else None

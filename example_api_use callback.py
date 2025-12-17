@@ -29,6 +29,7 @@ def main():
         # Process these calls in the right order
         flags = {
             EliteCloudApiFlag.RENEW_HANDLER_START: True,
+            EliteCloudApiFlag.DIAGNOSTICS_COLLECT: True,
         }        
         api = EliteCloudApi(TEST_USERNAME, TEST_PASSWORD, flags=flags)
 
@@ -41,13 +42,13 @@ def main():
 
             logger.info("")
             logger.info(f"site '{site_name}':")
-            logger.info(json.dumps(site, indent=4))
+            #logger.info(json.dumps(site, indent=4))
 
             site_resources = api.fetch_site_resources(site_uuid)
 
             logger.info("")
             logger.info(f"site '{site_name}' resources:")
-            logger.info(json.dumps(site_resources, indent=4))
+            #logger.info(json.dumps(site_resources, indent=4))
 
         # Once the sites and their resources are available, subscribe to update events
         # This will return the initial value and any changes.
@@ -71,12 +72,26 @@ def main():
 
 
 def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict):
-    logger.info("")
-    logger.info(f"site '{site.name}' {section} {id}:")
+    """
+    Can be called with either:
+      site   section   id          status
+    - site   "status"  None        dict containing all areas, inputs and outputs
+    - site   "area"    area no.    string containing area status
+    - site   "output"  output no.  string containing output status
+    - site   "input"   input no.   array containing input statuses
+    """
     if section == "status":
-        logger.info(json.dumps(status, indent=4))
+        # Already logged as debug in caller
+        #logger.info("")
+        #logger.info(f"site '{site.name}' {section}:")
+        #logger.info(json.dumps(status, indent=4))
+        pass
     else:
-        logger.info(json.dumps(status))
+        # Already logged as debug in caller
+        #logger.info("")
+        #logger.info(f"site '{site.name}' {section} {id}:")
+        #logger.info(json.dumps(status))
+        pass
 
 
 # main loop

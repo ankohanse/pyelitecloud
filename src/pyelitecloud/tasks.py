@@ -16,6 +16,7 @@ class AsyncTaskHelper:
         self.result = None
         self._task = None
         self._stop_event = asyncio.Event()
+        self._wakeup_event = asyncio.Event()
 
     async def start(self):
         coro = self.target_function(*self.args, **self.kwargs)
@@ -25,19 +26,24 @@ class AsyncTaskHelper:
     async def stop(self):
         try:
             self._stop_event.set()
+            self._wakeup_event.set()
             self._result = await self._task # await the task to allow it to finish and cleanup
         except asyncio.CancelledError:
             pass
 
         return self.result
-
+    
     def is_stop_requested(self):
         return self._stop_event.is_set()
+
+    async def wakeup(self):
+        self._wakeup_event.set()
     
-    async def wait_for_stop(self, timeout: float):
+    async def wait_for_wakeup(self, timeout: float):
         """Returns True if stop_event was set, False on timeout"""
         try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout)
+            await asyncio.wait_for(self._wakeup_event.wait(), timeout=timeout)
+            self._wakeup_event.clear()
             return True
 
         except asyncio.TimeoutError:
@@ -58,6 +64,7 @@ class TaskHelper(threading.Thread):
         self.result = None
         self._task = None
         self._stop_event = threading.Event()
+        self._wakeup_event = threading.Event()
 
     def start(self):
         super().start()
@@ -76,8 +83,13 @@ class TaskHelper(threading.Thread):
     def is_stop_requested(self):
         return self._stop_event.is_set()
     
-    def wait_for_stop(self, timeout: float) -> bool:
+    def wakeup(self):
+        self._wakeup_event.set()
+        
+    def wait_for_wakeup(self, timeout: float) -> bool:
         """Returns True if stop_event was set, False on timeout"""
-        return self._stop_event.wait(timeout=timeout)
+        res = self._wakeup_event.wait(timeout=timeout)
+        self._wakeup_event.clear()
+        return res
          
     
