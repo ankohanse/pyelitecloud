@@ -27,6 +27,7 @@ class AsyncTaskHelper:
         try:
             self._stop_event.set()
             self._wakeup_event.set()
+            
             self._result = await self._task # await the task to allow it to finish and cleanup
         except asyncio.CancelledError:
             pass
@@ -76,6 +77,7 @@ class TaskHelper(threading.Thread):
 
     def stop(self):
         self._stop_event.set()
+        self._wakeup_event.set()
         
         super().join()
         return self.result
