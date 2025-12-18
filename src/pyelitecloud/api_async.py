@@ -47,9 +47,18 @@ from .tasks import (
     AsyncTaskHelper,
     TaskHelper,
 )
+from .ws_async import (
+    AsyncEliteCloudWebSocket,
+)
+from .ws_sync import (
+    EliteCloudWebSocket,
+)
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+RESPONSE_WAKEUP_TIMEOUT = 1    # one second
 
 
 class EliteCloudApiFlag(StrEnum):
@@ -105,11 +114,11 @@ class AsyncEliteCloudApi:
         self._http_client_close: bool = False if client else True     # Do not close an external passed client
 
         # Websockets Client
-        self._ws_task = None
-        self._response_task = None
+        self._ws_client = AsyncEliteCloudWebSocket()
+        self._ws_client.on_response_queued(self._on_response_queued)
 
-        self._request_queue: asyncio.Queue = asyncio.Queue()
-        self._response_queue: asyncio.Queue = asyncio.Queue()
+        # Response handling
+        self._response_task = None
 
         # Locks to protect certain operations from being called from multiple threads
         self._login_lock = asyncio.Lock()
@@ -156,8 +165,8 @@ class AsyncEliteCloudApi:
             await self._http_client.aclose()
             self._http_client = None
 
-        if self._ws_task is not None:
-            await self._ws_task.stop()
+        if self._ws_client is not None:
+            await self._ws_client.stop()
 
         if self._response_task is not None:
             await self._response_task.stop()
@@ -360,17 +369,17 @@ class AsyncEliteCloudApi:
             self._renew_task = AsyncTaskHelper(self._login_renew_handler)
             await self._renew_task.start()
 
-        # If needed, start our interal websocket response handler
+        # If needed, start our interal response handler
         if self._response_task is None:
             self._response_task = AsyncTaskHelper(self._response_handler)
             await self._response_task.start()
 
-        # if needed, start our websocket_handler thread
-        if self._ws_task is None:
-            self._ws_task = AsyncTaskHelper(self._ws_handler)
-            await self._ws_task.start()
-        else:
-            self._ws_task.wakeup()
+        # if needed, (re-)start our websocket client and
+        # queue any subscribe requests we previously had
+        self._ws_client.start(self._access_token)
+
+        for site_uuid in self._sites_subscribed:
+            await self._subscribe_site_status(site_uuid, force=True)
 
         return True
 
@@ -386,14 +395,13 @@ class AsyncEliteCloudApi:
                 # Reuse access token, renew it, or re-login
                 await self.login()
                 
-                # Wait until access token is almost expired, or wait at least 1 minute
+                # Compute timespan until access token is almost expired, or at least 1 minute
                 exp_timestamp = self._renew_schedule or 0
                 now_timestamp = utcnow_ts()
                 delay_seconds = max(math.ceil(exp_timestamp - now_timestamp), 60)
-
-                #AJH
                 _LOGGER.debug(f"Next token renew scheduled for {datetime.fromtimestamp(exp_timestamp)} ({delay_seconds} seconds from now)")
 
+                # Wait computed timespan, or until we receive a wakeup
                 await self._renew_task.wait_for_wakeup(timeout = delay_seconds)
 
             except Exception as ex:
@@ -430,6 +438,9 @@ class AsyncEliteCloudApi:
         if self._login_time and method not in [LoginMethod.ACCESS_TOKEN]:
            _LOGGER.debug(f"Logout")
 
+        # Trigger pause of the websocket client. Will be restarted again when new token is set.
+        self._ws_client.pause()
+
         # Do not close the http-client. Instead we will simply forget the access-token. 
         # On a next request, the http client will act like it is a new one.
         self._access_token = None
@@ -447,11 +458,6 @@ class AsyncEliteCloudApi:
         if not context.startswith("login"):
             self._login_method = None
             self._login_time = None
-    
-        # stop websocket listener; we'll start it again when we get a new access-token
-        if self._ws_task is not None and not context.startswith("ws"):
-            await self._ws_task.stop()
-            self._ws_task = None
 
 
     def _get_jwt(self, token: str|None, field: str, default:Any=None) -> float:
@@ -654,7 +660,7 @@ class AsyncEliteCloudApi:
         self._diagnostics.add(dt, context, request, None)
 
         # Queue the request and remember we are subscribed
-        await self._request_queue.put(request)
+        await self._ws_client.request_queue.put(request)
         self._sites_subscribed.add(site_uuid)
 
 
@@ -752,82 +758,10 @@ class AsyncEliteCloudApi:
             return None
     
 
-    async def _ws_handler(self):
-        """
-        Parallel task that will handle all websocket operations
-        """
-        _LOGGER.debug(f"Websocket handler started")
-
-        while not self._ws_task.is_stop_requested():
-            try:
-                # Wait until we get an access token
-                if self._access_token is None:
-                    await self._ws_task.wait_for_wakeup(timeout=1)
-                    continue
-
-                # (re-)connect
-                url = PANEL_API_WS + '/ws/panel/'
-                headers = {
-                    "Authorization": f"Bearer {self._access_token}",
-                    "Origin": url,
-                }
-                async with httpx_ws.aconnect_ws(url=url, headers=headers) as ws:
-
-                    # Queue any subscribe requests we previously had
-                    for site_uuid in self._sites_subscribed:
-                        await self._subscribe_site_status(site_uuid, force=True)
-
-                    # Process requests and responses
-                    while not self._ws_task.is_stop_requested():
-                        
-                        try:
-                            # Send if a request is queued
-                            request = await self._request_queue.get_nowait()
-                            req_data = request["json"]
-
-                            await ws.send_json(req_data)
-                            #_LOGGER.debug(f"req: {req_data}")
-                        
-                        except (asyncio.QueueEmpty, TimeoutError):
-                            request = None  # Continue below to receive
-
-                        except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
-                            break   # Exit inner loop and reconnect in outer loop
-
-                        except Exception as ex:
-                            _LOGGER.debug(f"WebSocket send handler caught exception: {ex}")
-                            break   # disconnect and reconnect in outer loop
-                        
-                        try:
-                            # If we could have more requests waiting, only get already available reponse,
-                            # otherwise wait and listen for a response to come in
-                            rsp_data = await ws.receive_json(timeout=0 if request is not None else 1)
-                            #_LOGGER.debug(f"rsp: {rsp_data}")
-
-                            response = {
-                                "method": "WS",
-                                "json": rsp_data,
-                            }
-                            await self._response_queue.put(response)
-                            await self._response_task.wakeup()
-                        
-                        except (asyncio.QueueEmpty, TimeoutError):
-                            pass
-                        
-                        except (httpx_ws.WebSocketDisconnect, httpx_ws.WebSocketNetworkError):
-                            break   # Exit inner loop and reconnect in outer loop
-
-                        except Exception as ex:
-                            _LOGGER.debug(f"WebSocket receive handler caught exception: {ex}")
-                            break   # disconnect and reconnect in outer loop
-
-            except Exception as ex:
-                _LOGGER.debug(f"WebSocket handler caught exception: {ex}")
-                await self._logout(context="ws handler restart")
-                await self._renew_task.wakeup()
-                continue   # continue outer loop
-
-        _LOGGER.debug(f"Websocket handler stopped")
+    async def _on_response_queued(self):
+        """Called when the ws_client has queued a response."""
+        if self._response_task is not None:
+            await self._response_task.wakeup()
 
 
     async def _response_handler(self):
@@ -839,7 +773,7 @@ class AsyncEliteCloudApi:
         while not self._response_task.is_stop_requested():
             try:
                 # Get the reponse. Will raise exception if nothing there
-                response = await self._response_queue.get_nowait()
+                response = await self._ws_client.response_queue.get_nowait()
                 rsp_data = response.get("json", {})
                 rsp_type = rsp_data.get("type", "")
                 rsp_payload = rsp_data.get("payload", {})
@@ -914,7 +848,7 @@ class AsyncEliteCloudApi:
                 self._diagnostics.add(dt, context, None, response)
 
             except asyncio.QueueEmpty:
-                await self._response_task.wait_for_wakeup(timeout=1)
+                await self._response_task.wait_for_wakeup(timeout=RESPONSE_WAKEUP_TIMEOUT)
             
             except Exception as ex:
                 _LOGGER.debug(f"Response handler caught exception: {ex}")

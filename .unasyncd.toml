@@ -10,11 +10,14 @@ exclude = [
 
 [tool.unasyncd.files]
     "src/pyelitecloud/api_async.py" = "src/pyelitecloud/api_sync.py"
+    "src/pyelitecloud/ws_async.py" = "src/pyelitecloud/ws_sync.py"
 
 [tool.unasyncd.add_replacements]
     "AsyncEliteCloudApi" = "EliteCloudApi"
+    "AsyncEliteCloudWebSocket" = "EliteCloudWebSocket"
     "httpx.AsyncClient" = "httpx.Client"
     "httpx_ws.aconnect_ws" = "httpx_ws.connect_ws"
+    "httpx_ws.AsyncWebSocketSession" = "httpx_ws.WebSocketSession"
     "AsyncTaskHelper" = "TaskHelper"
     "asyncio.Queue" = "queue.Queue"
     "asyncio.QueueEmpty" = "queue.Empty"
