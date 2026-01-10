@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 from dataclasses import asdict
 from datetime import datetime
 
-from pyelitecloud import AsyncEliteCloudApi
+from pyelitecloud import AsyncEliteCloudApi, EliteCloudApiFlag, EliteCloudSite
 
 # Setup logging to StdOut
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)-8s %(message)s')
@@ -27,7 +28,11 @@ async def main():
     api = None
     try:
         # Process these calls in the right order
-        api = AsyncEliteCloudApi(TEST_USERNAME, TEST_PASSWORD)
+        flags = {
+            EliteCloudApiFlag.RENEW_HANDLER_START: True,
+            EliteCloudApiFlag.DIAGNOSTICS_COLLECT: True,
+        }        
+        api = AsyncEliteCloudApi(TEST_USERNAME, TEST_PASSWORD, flags=flags)
 
         # Retrieve sites available to this user.
         sites = await api.fetch_sites()
@@ -46,19 +51,15 @@ async def main():
             logger.info(f"site '{site_name}' resources:")
             logger.info(json.dumps(site_resources, indent=4))
 
-        # Once the sites and their resources are available, the calls below can be repeated periodically.
-        for t in range(30):
-            # Retrieve gateway(s) for the profile
-            for site in sites:
-                site_uuid = site.get('uuid')
-                site_name = site.get('name')
-                site_status = await api.fetch_site_status(site_uuid)
+        # Once the sites and their resources are available, subscribe to update events
+        # This will return the initial value and any changes.
+        for site in sites:
+            site_uuid = site.get('uuid')
 
-                logger.info("")
-                logger.info(f"site '{site_name}' status:")
-                logger.info(json.dumps(site_status, indent=4))
+            await api.subscribe_site_status(site_uuid, on_site_status)
 
-            # Wait a couple of minutes and retrieve statuses again
+        # Keep the application alive
+        for t in range(500):
             logger.info("")
             logger.info(f"wait")
             await asyncio.sleep(300)
@@ -71,5 +72,28 @@ async def main():
             await api.close()
 
 
+async def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict):
+    """
+    Can be called with either:
+      site   section   id          status
+    - site   "status"  None        dict containing all areas, inputs and outputs
+    - site   "area"    area no.    string containing area status
+    - site   "output"  output no.  string containing output status
+    - site   "input"   input no.   array containing input statuses
+    """
+    if section == "status":
+        # Already logged as debug in caller
+        logger.info("")
+        logger.info(f"site '{site.name}' {section}:")
+        logger.info(json.dumps(status, indent=4))
+        pass
+    else:
+        # Already logged as debug in caller
+        logger.info("")
+        logger.info(f"site '{site.name}' {section} {id}:")
+        logger.info(json.dumps(status))
+        pass
+
+
 # main loop
-asyncio.run(main()) 
+asyncio.run(main())  # main loop

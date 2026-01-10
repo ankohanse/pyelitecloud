@@ -376,7 +376,7 @@ class AsyncEliteCloudApi:
 
         # if needed, (re-)start our websocket client and
         # queue any subscribe requests we previously had
-        self._ws_client.start(self._access_token)
+        await self._ws_client.start(self._access_token)
 
         for site_uuid in self._sites_subscribed:
             await self._subscribe_site_status(site_uuid, force=True)
@@ -439,7 +439,7 @@ class AsyncEliteCloudApi:
            _LOGGER.debug(f"Logout")
 
         # Trigger pause of the websocket client. Will be restarted again when new token is set.
-        self._ws_client.pause()
+        await self._ws_client.pause()
 
         # Do not close the http-client. Instead we will simply forget the access-token. 
         # On a next request, the http client will act like it is a new one.
@@ -773,7 +773,7 @@ class AsyncEliteCloudApi:
         while not self._response_task.is_stop_requested():
             try:
                 # Get the reponse. Will raise exception if nothing there
-                response = await self._ws_client.response_queue.get_nowait()
+                response = self._ws_client.response_queue.get_nowait()
                 rsp_data = response.get("json", {})
                 rsp_type = rsp_data.get("type", "")
                 rsp_payload = rsp_data.get("payload", {})
@@ -813,7 +813,7 @@ class AsyncEliteCloudApi:
                             # Call status callback for this site (if any)
                             callback = self._sites_callbacks.get(site.uuid)
                             if callback is not None:
-                                callback(site, status_section, status_id, status_val)
+                                await callback(site, status_section, status_id, status_val)
 
                     case "area" | "input" | "output":
                         # A status item is received
@@ -840,7 +840,7 @@ class AsyncEliteCloudApi:
                             # Call status callback for this site (if any)
                             callback = self._sites_callbacks.get(site.uuid)
                             if callback is not None:
-                                callback(site, status_section, status_id, status_val)
+                                await callback(site, status_section, status_id, status_val)
 
                 # Add diagnostics if configured
                 dt = utcnow_dt()

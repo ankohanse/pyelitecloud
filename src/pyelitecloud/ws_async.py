@@ -127,7 +127,7 @@ class AsyncEliteCloudWebSocket:
         """Send a request (if any) over the websocket"""
         try:
             # Send if a request is queued
-            request = await self._request_queue.get_nowait()
+            request = self._request_queue.get_nowait()
             req_data = request["json"]
 
             await ws.send_json(req_data)
