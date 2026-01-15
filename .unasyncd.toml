@@ -11,6 +11,7 @@ exclude = [
 [tool.unasyncd.files]
     "src/pyelitecloud/api_async.py" = "src/pyelitecloud/api_sync.py"
     "src/pyelitecloud/ws_async.py" = "src/pyelitecloud/ws_sync.py"
+    "tests/test_api_async.py" = "tests/test_api_sync.py"
 
 [tool.unasyncd.add_replacements]
     "AsyncEliteCloudApi" = "EliteCloudApi"

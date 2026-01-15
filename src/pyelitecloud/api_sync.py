@@ -69,6 +69,7 @@ class EliteCloudApiFlag(StrEnum):
     RENEW_HANDLER_START   = "renew_handler_start"   # bool
     DIAGNOSTICS_COLLECT   = "diagnostics_collect"   # bool
     DEVICE_ID             = "device_id"             # str
+    RESPONSE_DIVERT       = "response_divert"       # bool
 
 
 class EliteCloudApi:
@@ -84,6 +85,7 @@ class EliteCloudApi:
         # Configuration
         self._username: str = username
         self._password: str = password
+        self._flags = flags
 
         # Login data
         self._login_time: datetime|None = None
@@ -122,6 +124,7 @@ class EliteCloudApi:
 
         # Response handling
         self._response_task = None
+        self._response_divert = flags.get(EliteCloudApiFlag.RESPONSE_DIVERT, False)
 
         # Locks to protect certain operations from being called from multiple threads
         self._login_lock = threading.Lock()
@@ -818,7 +821,21 @@ class EliteCloudApi:
                             if callback is not None:
                                 callback(site, status_section, status_id, status_val)
 
-                    case "area" | "input" | "output":
+                            # If requested, also divert the status into individual status updates
+                            if self._response_divert:
+                                for status_section in ["area", "input", "output"]:
+                                    section_val = status_val.get(status_section, [])
+                                    for item_val in section_val:
+                                        item_id = item_val.get("id", "")
+                                        item_status = item_val.get("status", "")
+                                        callback(site, status_section, item_id, item_status)
+                                for status_section in ["tamper", "system"]:
+                                    item_val = status_val.get(status_section, [])
+                                    item_id = ""
+                                    item_status = item_val.get("status", "")
+                                    callback(site, status_section, item_id, item_status)
+
+                    case "area" | "input" | "output" | "tamper" | "system":
                         # A status item is received
                         panel = rsp_payload.get("panel", {})
                         panel_serial = panel.get("serial_no", "")
