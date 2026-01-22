@@ -60,7 +60,7 @@ class AsyncEliteCloudWebSocket:
             await self._ws_task.start()
         else:
             self._restart_requested.set()
-            self._ws_task.wakeup()
+            await self._ws_task.wakeup()
 
 
     async def pause(self):
