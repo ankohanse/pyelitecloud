@@ -149,7 +149,7 @@ class AsyncEliteCloudWebSocket:
             #_LOGGER.debug(f"rsp: {rsp_data}")
 
             response = {
-                "method": "WS",
+                "method": "WS RSP",
                 "json": rsp_data,
             }
             await self._response_queue.put(response)

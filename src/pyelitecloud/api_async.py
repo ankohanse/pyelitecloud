@@ -651,7 +651,7 @@ class AsyncEliteCloudApi:
         dt = utcnow_dt()
         context = f"subscribe site-status {site.uuid}"
         request = {
-            "method": "WS",     
+            "method": "WS REQ",     
             "json": {
                 "type": "subscribe",
                 "body": {

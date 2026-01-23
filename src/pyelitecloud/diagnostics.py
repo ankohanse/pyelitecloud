@@ -89,7 +89,7 @@ class EliteCloudDiagnostics:
             return
 
         method = request.get("method", None) if request is not None else response.get("method", None) if response is not None else None
-        method = method.replace("GET", "HttpGet").replace("POST", "HttpPost") if method is not None else None
+        method = method.replace("GET", "HTTP GET").replace("POST", "HTTP POST") if method is not None else None
 
         duration = response.get("elapsed", None) if response is not None else None
         duration = round(duration, 0) if duration is not None else None

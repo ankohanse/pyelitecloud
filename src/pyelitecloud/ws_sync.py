@@ -153,7 +153,7 @@ class EliteCloudWebSocket:
             #_LOGGER.debug(f"rsp: {rsp_data}")
 
             response = {
-                "method": "WS",
+                "method": "WS RSP",
                 "json": rsp_data,
             }
             self._response_queue.put(response)
