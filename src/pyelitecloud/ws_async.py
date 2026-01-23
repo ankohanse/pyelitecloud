@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import httpx
 import httpx_ws
 
 from pyelitecloud.const import PANEL_API_WS
@@ -96,7 +97,9 @@ class AsyncEliteCloudWebSocket:
                     "Authorization": f"Bearer {self._token}",
                     "Origin": url,
                 }
-                async with httpx_ws.aconnect_ws(url=url, headers=headers) as ws:
+                client = httpx.AsyncClient(verify=False)
+
+                async with httpx_ws.aconnect_ws(url=url, headers=headers, client=client) as ws:
 
                     self._restart_requested.clear()
 

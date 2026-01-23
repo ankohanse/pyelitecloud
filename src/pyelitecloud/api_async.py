@@ -223,9 +223,6 @@ class AsyncEliteCloudApi:
 
         if self._access_token is None or self._access_exp_ts is None:
             # No acces-token to check; silently continue to the next login method (renew-token)
-            #AJH
-            _LOGGER.debug(f"No Access-Token")
-
             return False
 
         # inspect the exp field inside the access_token
@@ -241,9 +238,6 @@ class AsyncEliteCloudApi:
             "access_expire": datetime.fromtimestamp(self._access_exp_ts, timezone.utc)
         }
         self._diagnostics.add(dt, context, None, None, token)
-
-        #AJH
-        _LOGGER.debug(f"Reuse the access-token")
         return True
 
 
@@ -252,9 +246,6 @@ class AsyncEliteCloudApi:
 
         if not self._device_token:
             # No device-token; silently continue to the next login method
-            #AJH
-            _LOGGER.debug(f"No Device-Token")
-
             return False
         
         # inspect the exp field inside the access_token
