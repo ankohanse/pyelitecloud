@@ -132,7 +132,16 @@ class AsyncEliteCloudApi:
 
     @property
     def diagnostics(self) -> dict:
-        return self._diagnostics.get()
+        api_data = {
+            "login_time": self._login_time,
+            "login_method": self._login_method,
+            "user_uuid": self._user_uuid,
+            "device_uuid": self._device_uuid,
+            "device_id": self._device_id,
+            "sites": self._sites,
+            "sites_subscribed": self._sites_subscribed,
+        }
+        return self._diagnostics.create(api_data)
 
     @property
     def user_uuid(self) -> str:

@@ -126,13 +126,8 @@ class EliteCloudDiagnostics:
         self._details[context] = history_detail
 
 
-    async def get(self) -> dict[str, Any]:
+    def create(self, api_data) -> dict[str, Any]:
         """Return the gathered diagnostics"""
-
-        data = {
-            "login_time": self._login_time,
-            "login_method": self._login_method,
-        }
 
         calls_total = sum([ n for key, n in self._counters.items() ]) or 1
         calls_counter = { key: n for key, n in self._counters.items() }
@@ -147,7 +142,7 @@ class EliteCloudDiagnostics:
         methods_percent = { key: round(100.0 * n / methods_total, 2) for key, n in methods_counter.items() }
         
         return {
-            "data": data,
+            "data": api_data,
             "diagnostics": {
                 "dt": utcnow_dt(),
                 "durations": {
