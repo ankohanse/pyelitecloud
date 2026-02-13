@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 
-from pyelitecloud import EliteCloudApi, EliteCloudApiFlag, EliteCloudSite
+from pyelitecloud import EliteCloudApi, EliteCloudApiFlag, EliteCloudSite, EliteCloudCmdAction, EliteCloudCmdSection
 
 # Setup logging to StdOut
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)-8s %(message)s')
@@ -18,9 +18,10 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 TEST_USERNAME = "fill in your SmartWater username here"
 TEST_PASSWORD = "fill in your SmartWater password here"
+TEST_PASSCODE = "fill in your alarm pincode here"
 #
 # Comment out the line below if username and password are set above
-from tests import TEST_USERNAME, TEST_PASSWORD
+from tests import TEST_USERNAME, TEST_PASSWORD, TEST_PASSCODE
 
 
 def main():
@@ -59,9 +60,22 @@ def main():
 
         # Keep the application alive
         for t in range(500):
+            # Demo actions
+            match t:
+                case 1|2:
+                    logger.info("")
+                    logger.info(f"site '{site_name}' toggle output 3")
+                    api.send_site_command(site_uuid, section=EliteCloudCmdSection.OUTPUT, id=3, action=EliteCloudCmdAction.TOGGLE)
+
+                case 3|6:   # 4 and 5 are skipped, arming takes a bit of time...
+                    logger.info("")
+                    logger.info(f"site '{site_name}' area 1 arm or disarm")
+                    # Demo: arm and disarm
+                    api.send_site_command(site_uuid, section=EliteCloudCmdSection.STAY, id=1, action=EliteCloudCmdAction.TOGGLE, passcode=TEST_PASSCODE)
+
             logger.info("")
             logger.info(f"wait")
-            time.sleep(300)
+            time.sleep(20)
 
     except Exception as e:
         logger.info(f"Unexpected exception: {e}")

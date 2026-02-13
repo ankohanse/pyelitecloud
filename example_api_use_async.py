@@ -7,7 +7,8 @@ import time
 from dataclasses import asdict
 from datetime import datetime
 
-from pyelitecloud import AsyncEliteCloudApi, EliteCloudApiFlag, EliteCloudSite
+from pyelitecloud import AsyncEliteCloudApi, EliteCloudApiFlag, EliteCloudSite, EliteCloudCmdSection, EliteCloudCmdAction
+
 
 # Setup logging to StdOut
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG, format='%(asctime)s %(levelname)-8s %(message)s')
@@ -17,11 +18,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
-TEST_USERNAME = "fill in your SmartWater username here"
-TEST_PASSWORD = "fill in your SmartWater password here"
+TEST_USERNAME = "fill in your Elite Cloud username here"
+TEST_PASSWORD = "fill in your Elite Cloud password here"
+TEST_PASSCODE = "fill in your alarm pincode here"
 #
 # Comment out the line below if username and password are set above
-from tests import TEST_USERNAME, TEST_PASSWORD
+from pyelitecloud.data import EliteCloudCmdAction, EliteCloudCmdSection, EliteCloudSection
+from tests import TEST_USERNAME, TEST_PASSWORD, TEST_PASSCODE
 
 
 async def main():
@@ -50,7 +53,7 @@ async def main():
             logger.info("")
             logger.info(f"site '{site_name}' resources:")
             logger.info(json.dumps(site_resources, indent=4))
-
+        
         # Once the sites and their resources are available, subscribe to update events
         # This will return the initial value and any changes.
         for site in sites:
@@ -60,9 +63,22 @@ async def main():
 
         # Keep the application alive
         for t in range(500):
+            # Demo actions
+            match t:
+                case 1|2:
+                    logger.info("")
+                    logger.info(f"site '{site_name}' toggle output 3")
+                    await api.send_site_command(site_uuid, section=EliteCloudCmdSection.OUTPUT, id=3, action=EliteCloudCmdAction.TOGGLE)
+
+                case 3|4:
+                    logger.info("")
+                    logger.info(f"site '{site_name}' area 1 arm or disarm")
+                    # Demo: arm and disarm
+                    await api.send_site_command(site_uuid, section=EliteCloudCmdSection.STAY, id=1, action=EliteCloudCmdAction.TOGGLE, passcode=TEST_PASSCODE)
+
             logger.info("")
             logger.info(f"wait")
-            await asyncio.sleep(300)
+            await asyncio.sleep(20)
 
     except Exception as e:
         logger.info(f"Unexpected exception: {e}")
@@ -72,7 +88,7 @@ async def main():
             await api.close()
 
 
-async def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict):
+async def on_site_status(site: EliteCloudSite, section:EliteCloudSection, id:str, status: dict):
     """
     Can be called with either:
       site   section   id          status
@@ -81,7 +97,7 @@ async def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict
     - site   "output"  output no.  string containing output status
     - site   "input"   input no.   array containing input statuses
     """
-    if section == "status":
+    if section == EliteCloudSection.STATUS:
         # Already logged as debug in caller
         logger.info("")
         logger.info(f"site '{site.name}' {section}:")

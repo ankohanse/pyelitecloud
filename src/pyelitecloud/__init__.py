@@ -6,6 +6,9 @@ from .api_sync import (
     EliteCloudApiFlag,
 )
 from .data import (
+    EliteCloudSection,
+    EliteCloudCmdSection,
+    EliteCloudCmdAction,
     EliteCloudSite,
     EliteCloudConnectError, 
     EliteCloudAuthError, 

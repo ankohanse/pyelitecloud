@@ -21,6 +21,23 @@ class LoginMethod(StrEnum):
     RENEW_TOKEN = 'Renew-Token'
     AUTH_API = 'Auth-Api'
 
+class EliteCloudSection(StrEnum):
+    STATUS = 'status'
+    AREA = 'area'
+    INPUT = 'input'
+    OUTPUT = 'output'
+    TAMPER = 'tamper'
+    SYSTEM = 'system'
+
+class EliteCloudCmdSection(StrEnum):
+    STAY = "stay"
+    ARM = "arm"
+    INPUT = 'input'
+    OUTPUT = 'output'
+
+class EliteCloudCmdAction(StrEnum):
+    TOGGLE = 'toggle'
+
 
 class EliteCloudError(Exception):
     """Exception to indicate generic error failure."""    
@@ -47,12 +64,20 @@ class EliteCloudSite:
 
 class EliteCloudSites(list[EliteCloudSite]):
     def get_by_uuid(self, uuid: str):
-        return next( (s for s in self if s.uuid==uuid), None)
+        site = next( (s for s in self if s.uuid==uuid), None)
+        if site is None:
+            raise EliteCloudParamError(f"No site found with id '{uuid}'")
+        return site
 
     def get_by_mac(self, mac: str):
-        return next( (s for s in self if s.panel_mac==mac), None)
+        site = next( (s for s in self if s.panel_mac==mac), None)
+        if site is None:
+            raise EliteCloudParamError(f"No site found with mac '{mac}'")
+        return site
     
     def get_by_serial(self, serial: str):
-        return next( (s for s in self if s.panel_serial==serial), None)
-
+        site = next( (s for s in self if s.panel_serial==serial), None)
+        if site is None:
+            raise EliteCloudParamError(f"No site found with serial '{serial}'")
+        return site
 

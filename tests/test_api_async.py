@@ -2,6 +2,7 @@ import asyncio
 import copy
 from datetime import datetime
 import logging
+from typing import Any
 import pytest
 import pytest_asyncio
 
@@ -9,6 +10,9 @@ from src.pyelitecloud import (
     AsyncEliteCloudApi,
     EliteCloudApi,
     EliteCloudApiFlag,
+    EliteCloudCmdAction,
+    EliteCloudCmdSection,
+    EliteCloudSection,
     EliteCloudSite,
     EliteCloudError,
     EliteCloudAuthError,
@@ -269,7 +273,7 @@ async def test_subscribe_status(name, method, loop, exp_except, request):
     counters_sections = {}
 
     # Define inline callback function
-    async def on_status(site: EliteCloudSite, section:str, id:str, status: dict):
+    async def on_status(site: EliteCloudSite, section:EliteCloudSection, id:str, status: dict):
         if site.uuid in counters_sites:
             counters_sites[site.uuid] += 1
         else:
@@ -287,9 +291,8 @@ async def test_subscribe_status(name, method, loop, exp_except, request):
 
         await context.api.subscribe_site_status(site_uuid, on_status)
 
-    # Wait a moment for statusses to come in
+    # Wait a moment for initial statusses to come in
     await asyncio.sleep(2)
-
     # Check that status updates were received
     for site in sites:
         site_uuid = site.get('uuid')
@@ -300,4 +303,75 @@ async def test_subscribe_status(name, method, loop, exp_except, request):
         for section in ["status", "area", "input", "output", "tamper", "system"]:
             assert section in counters_sections
             assert counters_sections[section] >= len(sites)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("context")
+@pytest.mark.parametrize(
+    "name, cmd_section, cmd_id, cmd_action, exp_status, exp_except",
+    [
+        ("output 3",  EliteCloudCmdSection.OUTPUT, 3, EliteCloudCmdAction.TOGGLE, {"on", "off"}, None),
+    ]
+)
+async def test_send_command(name, cmd_section, cmd_id, cmd_action, exp_status, exp_except, request):
+    context = request.getfixturevalue("context")
+    flags = {
+        EliteCloudApiFlag.RESPONSE_DIVERT: True     # Also pass overal status messages as individual updates
+    }
+    context.api = AsyncEliteCloudApi(TEST_USERNAME, TEST_PASSWORD, flags=flags)
+    await context.api.login()
+
+    # Get profile
+    sites = await context.api.fetch_sites()
+
+    assert sites is not None
+    assert type(sites) is list
+    assert len(sites) > 0
+
+    # Declare counters to track callbacks received
+    counters_sites = {}
+    counters_status = {}
+
+    # Define inline callback function
+    async def on_status(site: EliteCloudSite, section:EliteCloudSection, id:str, status: Any):
+        if section != cmd_section or id != cmd_id:
+            return
+        
+        if site.uuid in counters_sites:
+            counters_sites[site.uuid] += 1
+        else:
+            counters_sites[site.uuid] = 1
+
+        if site.uuid in counters_status:
+            counters_status[site.uuid].add(status)
+        else:
+            counters_status[site.uuid] = { status }
+
+    # Subscribe to status updates for each site
+    for site in sites:
+        site_uuid = site.get('uuid')
+        assert site_uuid is not None
+
+        await context.api.subscribe_site_status(site_uuid, on_status)
+
+    # Wait a moment for statusses to come in
+    await asyncio.sleep(2)
+
+    # Send command
+    for site in sites:
+        site_uuid = site.get('uuid')
+        assert site_uuid is not None
+        await context.api.send_site_command(site_uuid, cmd_section, cmd_id, cmd_action)
+
+    # Wait a moment for resulting statusses to come in
+    await asyncio.sleep(2)
+
+    # Check that status updates were received
+    for site in sites:
+        site_uuid = site.get('uuid')
+
+        assert site_uuid in counters_sites
+        assert counters_sites[site_uuid] > 1
+        assert counters_status[site_uuid] == exp_status
+
 

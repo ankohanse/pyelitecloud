@@ -14,7 +14,7 @@ import threading
 
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
-from typing import Any
+from typing import Any, Union
 
 from .const import (
     AUTH_API_URL,
@@ -30,6 +30,9 @@ from .const import (
     utcnow_dt,
 )
 from .data import (
+    EliteCloudCmdAction,
+    EliteCloudCmdSection,
+    EliteCloudSection,
     EliteCloudSite,
     EliteCloudSites,
     LoginMethod,
@@ -153,6 +156,11 @@ class AsyncEliteCloudApi:
         """The unique id of the device. Only available after successfull login."""
         return self._device_uuid
 
+    @property
+    def sites(self) -> EliteCloudSites:
+        """The available sites. Only available after call to fetch_sites"""
+        return self._sites
+    
 
     @property
     def closed(self) -> bool:
@@ -551,21 +559,20 @@ class AsyncEliteCloudApi:
         return result
 
 
-    async def fetch_site_resources(self, site_uuid:str) -> list[dict]:
+    async def fetch_site_resources(self, site:EliteCloudSite|str) -> list[dict]:
         """
-        Get sites
+        Get sites.
         """
+
+        # Sanity check
+        if not isinstance(site, EliteCloudSite):
+            site = self._sites.get_by_uuid(site)
+
+        # Refresh login token if needed
         await self.login()
-
-        site = self._sites.get_by_uuid(site_uuid)
-        if site is None:
-            error = f"No site found with id '{site_uuid}'"
-            _LOGGER.info(error)
-            raise EliteCloudParamError(error)
-
         result = {}
 
-        _LOGGER.debug(f"Retrieve site areas for '{site.name}' ({site.uuid})")
+        _LOGGER.debug(f"Retrieve resources for areas of site '{site.name}' ({site.uuid})")
         result["area"] = await self._http_request(
             context = f"fetch site-area {site.uuid}",
             request = {
@@ -574,7 +581,7 @@ class AsyncEliteCloudApi:
             },
         )
 
-        _LOGGER.debug(f"Retrieve site inputs for '{site.name}' ({site.uuid})")
+        _LOGGER.debug(f"Retrieve resources for inputs of site '{site.name}' ({site.uuid})")
         result["input"] = await self._http_request(
             context = f"fetch site-input {site.uuid}",
             request = {
@@ -583,7 +590,7 @@ class AsyncEliteCloudApi:
             },
         )
 
-        _LOGGER.debug(f"Retrieve site outputs for '{site.name}' ({site.uuid})")
+        _LOGGER.debug(f"Retrieve  resources from outputs of site '{site.name}' ({site.uuid})")
         result["output"] = await self._http_request(
             context = f"fetch site-output {site.uuid}",
             request = {
@@ -595,18 +602,25 @@ class AsyncEliteCloudApi:
         return result
 
 
-    async def fetch_site_status(self, site_uuid: str):
+    async def fetch_site_status(self, site:EliteCloudSite|str):
         """
-        Get gatweway
+        Get gatweway.
+        Either site or site_uuid needs to be specified.
         """
-        await self.login()
 
+        # Sanity check
+        if not isinstance(site, EliteCloudSite):
+            site = self._sites.get_by_uuid(site)
+
+        # Refresh login token if needed
+        await self.login()
+        
         # If not already done, subscribe to site status
-        await self._subscribe_site_status(site_uuid)
+        await self._subscribe_site_status(site)
 
         # Fetch most recent status
         for retry in range(5):
-            status = self._sites_status.get(site_uuid)
+            status = self._sites_status.get(site.uuid)
             if status is not None:
                 return status
             
@@ -615,36 +629,42 @@ class AsyncEliteCloudApi:
         return None
 
 
-    async def subscribe_site_status(self, site_uuid: str, callback):
+    async def subscribe_site_status(self, site:EliteCloudSite|str, callback):
         """
         Register a callback function that will fire when:
         - Once immediately after subscribing
         - On each change of the status
-        """
-        await self.login()
 
+        Either site or site_uuid needs to be specified.
+        """
+
+        # Sanity check
+        if not isinstance(site, EliteCloudSite):
+            site = self._sites.get_by_uuid(site)
+
+        # Refresh login token if needed
+        await self.login()
+        
         # Remember callback (overwrite any previous one)
-        self._sites_callbacks[site_uuid] = callback
+        self._sites_callbacks[site.uuid] = callback
 
         # Subscribe to site status messages. 
         # May lead to nearly immediate call to the callback.
-        await self._subscribe_site_status(site_uuid)
+        await self._subscribe_site_status(site)
 
 
-    async def _subscribe_site_status(self, site_uuid: str, force:bool=False):
+    async def _subscribe_site_status(self, site:EliteCloudSite|str, force:bool=False):
         """
         Internal function, not affected by login_lock
         """
+        
+        # Sanity check
+        if not isinstance(site, EliteCloudSite):
+            site = self._sites.get_by_uuid(site)
 
         # Already subscribed?
-        if site_uuid in self._sites_subscribed and not force:
+        if site.uuid in self._sites_subscribed and not force:
             return
-
-        site = self._sites.get_by_uuid(site_uuid)
-        if site is None:
-            error = f"No site found with id '{site_uuid}'"
-            _LOGGER.info(error)
-            raise EliteCloudParamError(error)
 
         # Prepare the request to subscribe to status changes
         _LOGGER.debug(f"Subscribe to site status updates for site '{site.name}' ({site.uuid})")
@@ -664,7 +684,46 @@ class AsyncEliteCloudApi:
 
         # Queue the request and remember we are subscribed
         await self._ws_client.request_queue.put(request)
-        self._sites_subscribed.add(site_uuid)
+        self._sites_subscribed.add(site.uuid)
+
+
+    async def send_site_command(self, site:EliteCloudSite|str, section:EliteCloudCmdSection, id:int, action:EliteCloudCmdAction, passcode:str=None):
+        """
+        Send a command to a section (input or output)
+        """
+        # Sanity checks
+        if not isinstance(site, EliteCloudSite):
+            site = self._sites.get_by_uuid(site)
+
+        if passcode is None and section in [EliteCloudCmdSection.ARM, EliteCloudCmdSection.STAY]:
+            raise EliteCloudParamError(f"Passcode is required when sending '{section.value}' command")
+
+        # Refresh login token if needed
+        await self.login()
+        
+        _LOGGER.debug(f"Send command '{section.value} {id} {action.value}' to site '{site.name}' ({site.uuid}): ")
+
+        if section in [EliteCloudCmdSection.ARM, EliteCloudCmdSection.STAY]:
+            await self._http_request(
+                context = f"command {site.uuid} {section.value}",
+                request = {
+                    "method": "POST",
+                    "url": PANEL_API_URL + f'/command/panel/{site.panel_mac}/{site.panel_serial}/{section.value}/{action.value}/',
+                    "data": {
+                       "area_id": id,
+                       "passcode": passcode,
+                    }
+                },
+            )
+
+        else: # section in [EliteCloudCmdSection.INPUT, EliteCloudCmdSection.OUTPUT]:
+            await self._http_request(
+                context = f"command {site.uuid} {section.value}",
+                request = {
+                    "method": "GET",
+                    "url": PANEL_API_URL + f'/command/panel/{site.panel_mac}/{site.panel_serial}/{section.value}/{id}/{action.value}/',
+                },
+            )
 
 
     async def _http_request(self, context, request):
@@ -804,7 +863,7 @@ class AsyncEliteCloudApi:
 
                         status_id = ""
                         status_val = rsp_payload.get("body", {})
-                        status_section = rsp_type
+                        status_section = EliteCloudSection.STATUS
 
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
@@ -840,7 +899,7 @@ class AsyncEliteCloudApi:
                         body = rsp_payload.get("body", {})
                         status_id = body.get("id", "")
                         status_val = body.get("status", "")
-                        status_section = rsp_type
+                        status_section = EliteCloudSection(rsp_type)
 
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
