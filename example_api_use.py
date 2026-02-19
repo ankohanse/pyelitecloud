@@ -93,6 +93,8 @@ def on_site_status(site: EliteCloudSite, section:str, id:str, status: dict):
     - site   "area"    area no.    string containing area status
     - site   "output"  output no.  string containing output status
     - site   "input"   input no.   array containing input statuses
+    - site   "system"  type        array containing system statuses. Type is one of []
+    - site   "tamper"  type        array containing tamper statuses. Type is one of []'mains fail', 'battery low', ...]
     """
     if section == "status":
         # Already logged as debug in caller

@@ -38,6 +38,16 @@ class EliteCloudCmdSection(StrEnum):
 class EliteCloudCmdAction(StrEnum):
     TOGGLE = 'toggle'
 
+class EliteCloudStatusType(StrEnum):
+    MAINS_FAIL  = "mains fail"
+    BATTERY_LOW = "battery low"     
+
+ELITE_CLOUD_STATUS_TYPES_TAMPER = [
+    EliteCloudStatusType.MAINS_FAIL,
+    EliteCloudStatusType.BATTERY_LOW,
+]
+ELITE_CLOUD_STATUS_TYPES_SYSTEM = [
+]
 
 class EliteCloudError(Exception):
     """Exception to indicate generic error failure."""    

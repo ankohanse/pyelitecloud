@@ -30,6 +30,8 @@ from .const import (
     utcnow_dt,
 )
 from .data import (
+    ELITE_CLOUD_STATUS_TYPES_TAMPER,
+    ELITE_CLOUD_STATUS_TYPES_SYSTEM,
     EliteCloudCmdAction,
     EliteCloudCmdSection,
     EliteCloudSection,
@@ -701,7 +703,7 @@ class AsyncEliteCloudApi:
         # Refresh login token if needed
         await self.login()
         
-        _LOGGER.debug(f"Send command '{section.value} {id} {action.value}' to site '{site.name}' ({site.uuid}): ")
+        _LOGGER.debug(f"Send command '{section.value} {id} {action.value}' to site '{site.name}' ({site.uuid})")
 
         if section in [EliteCloudCmdSection.ARM, EliteCloudCmdSection.STAY]:
             await self._http_request(
@@ -891,7 +893,7 @@ class AsyncEliteCloudApi:
                                     item_status = item_val.get("status", "")
                                     await callback(site, status_section, item_id, item_status)
 
-                    case "area" | "input" | "output" | "tamper" | "system":
+                    case "area" | "input" | "output":
                         # A status item is received
                         panel = rsp_payload.get("panel", {})
                         panel_serial = panel.get("serial_no", "")
@@ -903,7 +905,7 @@ class AsyncEliteCloudApi:
 
                         site = self._sites.get_by_serial(panel_serial)
                         if site is not None:
-                            _LOGGER.debug(f"Received update for '{site.name}' {status_section} {status_id}: {json.dumps(status_val)}")
+                            _LOGGER.debug(f"Received update for '{site.name}' {status_section}: {json.dumps(body)}")
 
                             # Update our persisted sites statuses
                             cur_site = self._sites_status.get(site.uuid, {})
@@ -917,6 +919,39 @@ class AsyncEliteCloudApi:
                             callback = self._sites_callbacks.get(site.uuid)
                             if callback is not None:
                                 await callback(site, status_section, status_id, status_val)
+
+                    case "tamper" | "system":
+                        # A status item is received
+                        panel = rsp_payload.get("panel", {})
+                        panel_serial = panel.get("serial_no", "")
+
+                        body = rsp_payload.get("body", {})
+                        status_type = body.get("type", "")
+                        status_active = body.get("is_active", False)
+
+                        # rsp_type does not indicate the correct section. 
+                        # I.e. 'battery low' comes in as 'system' response but is stored under 'tamper' in status response
+                        status_section = EliteCloudSection.TAMPER if status_type in ELITE_CLOUD_STATUS_TYPES_TAMPER else EliteCloudSection.SYSTEM
+
+                        site = self._sites.get_by_serial(panel_serial)
+                        if site is not None:
+                            _LOGGER.debug(f"Received update for '{site.name}' {status_section}: {json.dumps(body)}")
+
+                            # Update our persisted sites statuses
+                            cur_site = self._sites_status.get(site.uuid, {})
+                            cur_section = cur_site.get(status_section, {})
+                            cur_status = cur_section.get("status", [])
+
+                            if status_active and status_type not in cur_status:
+                                cur_status.append(status_type)
+
+                            elif not status_active and status_type in cur_status:
+                                cur_status.remove(status_type)
+
+                            # Call status callback for this site (if any)
+                            callback = self._sites_callbacks.get(site.uuid)
+                            if callback is not None:
+                                await callback(site, status_section, status_type, status_active)
 
                 # Add diagnostics if configured
                 dt = utcnow_dt()
