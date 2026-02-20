@@ -10,6 +10,7 @@ from .data import (
     EliteCloudCmdSection,
     EliteCloudCmdAction,
     EliteCloudSite,
+    EliteCloudStatusType,
     EliteCloudConnectError, 
     EliteCloudAuthError, 
     EliteCloudDataError, 
