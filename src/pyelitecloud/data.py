@@ -73,8 +73,11 @@ class EliteCloudSite:
     panel_serial: str
 
 class EliteCloudSites(list[EliteCloudSite]):
+    def find_by_uuid(self, uuid: str):
+        return next( (s for s in self if s.uuid==uuid), None)
+
     def get_by_uuid(self, uuid: str):
-        site = next( (s for s in self if s.uuid==uuid), None)
+        site = self.find_by_uuid(uuid)
         if site is None:
             raise EliteCloudParamError(f"No site found with id '{uuid}'")
         return site

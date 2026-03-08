@@ -558,7 +558,8 @@ class EliteCloudApi:
                 panel_mac = site.get('panel',{}).get('mac_address'),
                 panel_serial = site.get('panel',{}).get('serial_no'),
             )
-            self._sites.append(site)
+            if self._sites.find_by_uuid(site.uuid) is None:
+                self._sites.append(site)
 
         # Return entire site list
         return result
